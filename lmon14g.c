@@ -1,4 +1,4 @@
-/*
+/* 
  * lmon.c -- Curses based Performance Monitor for Linux
  * Developer: Nigel Griffiths. 
  */
@@ -23,7 +23,7 @@ nmon: lnmon.o
 #define RAW(member)      (long)((long)(p->cpuN[i].member)   - (long)(q->cpuN[i].member))
 #define RAWTOTAL(member) (long)((long)(p->cpu_total.member) - (long)(q->cpu_total.member)) 
 
-#define VERSION "15h" 
+#define VERSION "14g" 
 char version[] = VERSION;
 static char *SccsId = "nmon " VERSION;
 
@@ -46,30 +46,6 @@ static char *SccsId = "nmon " VERSION;
 #include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
-
-/* Windows moved here so they can be cleared when the screen mode changes */
-WINDOW * padwelcome = NULL;
-WINDOW * padtop = NULL;
-WINDOW * padmem = NULL;
-WINDOW * padlarge = NULL;
-WINDOW * padpage = NULL;
-WINDOW * padker = NULL;
-WINDOW * padnet = NULL;
-WINDOW * padneterr = NULL;
-WINDOW * padnfs = NULL;
-WINDOW * padcpu = NULL;
-WINDOW * padsmp = NULL;
-WINDOW * padlong = NULL;
-WINDOW * paddisk = NULL;
-WINDOW * paddg = NULL;
-WINDOW * padmap = NULL;
-WINDOW * padjfs = NULL;
-#ifdef POWER
-	WINDOW * padlpar = NULL;
-#endif
-WINDOW * padverb = NULL;
-WINDOW * padhelp = NULL;
-
 
 /* for Disk Busy rain style output covering 100's of diskss on one screen */
 const char disk_busy_map_ch[] =
@@ -155,12 +131,18 @@ void error(char *err)
 	strncpy(errorstr,err,69);
 }
 
-/* Maximum number of lines in /proc files */
-/* Intel already has 26 (so here 30) per Hypterthread CPU (max 128*2 CPUs here) */
-/* POWER has only 6 to 7 lines but gets  1536 SMT threads soon */
-/* Erring on the saf side below */
-#define PROC_MAXLINES (16*1024) /*MAGIC COOKIE WARNING */
 
+/* Default size for smaller files */
+#define PROC_MAXBUF   (1024*4)
+
+/* /proc/stat size for 50-ish bytes per CPU */
+#define STAT_MAXBUF   (1024*64)
+
+/* /proc/cpuinfo can be 512 bytes per CPU and we allow 256 CPUs */
+/* and 20 lines per CPU so boost the buffers for this one */
+#define CPUINFO_MAXBUF (512*256)
+
+#define PROC_MAXLINES (20*256*sizeof(char *))
 
 int proc_cpu_done = 0;	/* Flag if we have run function proc_cpu() already in this interval */
 
@@ -168,7 +150,6 @@ int reread =0;
 struct {
 	FILE *fp;
 	char *filename;
-	int size;
 	int lines;
 	char *line[PROC_MAXLINES];
 	char *buf;
@@ -177,6 +158,19 @@ struct {
 
 void proc_init()
 {
+int i;
+	/* Initialise the file pointers */
+	for(i=0;i<P_NUMBER;i++) {
+		proc[i].fp = 0;
+		proc[i].read_this_interval = 0;
+
+		if(i == P_CPUINFO)
+			proc[i].buf  = (char *)malloc(CPUINFO_MAXBUF);
+		else if(i == P_STAT)
+			proc[i].buf  = (char *)malloc(STAT_MAXBUF);
+		else
+			proc[i].buf  = (char *)malloc(PROC_MAXBUF);
+	}
 	proc[P_CPUINFO].filename = "/proc/cpuinfo";
 	proc[P_STAT].filename    = "/proc/stat";
 	proc[P_VERSION].filename = "/proc/version";
@@ -194,6 +188,7 @@ int i;
 int size;
 int found;
 char buf[1024];
+int bytes;
 
 	if(proc[num].read_this_interval == 1 )
 		return;
@@ -212,20 +207,14 @@ char buf[1024];
 	if( num == P_STAT)
 		proc_cpu_done = 0;
 
-	if(proc[num].size == 0) {
-		/* first time so allocate  initial now */
-		proc[num].buf = MALLOC(512);
-		proc[num].size = 512;
-	}
-	
-	for(i=0;i<4096;i++) {   /* MAGIC COOKIE WARNING  POWER8 default install can have 2655 processes */
-		size = fread(proc[num].buf, 1, proc[num].size-1, proc[num].fp);
-		if(size < proc[num].size -1)
-			break;
-		proc[num].size +=512;
-		proc[num].buf = REALLOC(proc[num].buf,proc[num].size);
-		rewind(proc[num].fp);
-	}
+	if(num == P_CPUINFO)
+		bytes = CPUINFO_MAXBUF -1;
+	else if(num == P_STAT)
+		bytes = STAT_MAXBUF -1;
+	else
+		bytes = PROC_MAXBUF -1;
+
+	size = fread(proc[num].buf, 1, bytes, proc[num].fp);
 
 	proc[num].buf[size]=0;
 	proc[num].lines=0;
@@ -337,11 +326,8 @@ struct procsinfo {
                 unsigned long statm_drs;        /* data/stack */
                 unsigned long statm_lrs;        /* library */
                 unsigned long statm_dt;         /* dirty pages */
-
-                unsigned long long read_io;     /* storage read bytes */
-                unsigned long long write_io;    /* storage write bytes */
 };
-int isroot = 0;
+
 
 #include <mntent.h>
 #include <fstab.h>
@@ -354,16 +340,6 @@ time_t  timer;			/* used to work out the hour/min/second */
 
 /* Counts of resources */
 int	cpus = 1;  	/* number of CPUs in system (lets hope its more than zero!) */
-#ifdef X86
-int   cores          = 0;
-int   siblings       = 0;
-int   processorchips = 0;
-int   hyperthreads   = 0;
-char *vendor_ptr = "-";
-char *model_ptr  = "-";
-char *mhz_ptr    = "-";
-char *bogo_ptr   = "-";
-#endif
 int old_cpus = 1;	/* Number of CPU seen in previuos interval */
 int	max_cpus = 1;  	/* highest number of CPUs in DLPAR */
 int	networks = 0;  	/* number of networks in system  */
@@ -403,6 +379,7 @@ int	show_kernel  = 0;
 int	show_nfs     = 0;
 int	show_net     = 0;
 int	show_neterror= 0;
+int	show_partitions  = 0;
 int	show_help    = 0;
 int	show_top     = 0;
 int	show_topmode = 1;
@@ -414,7 +391,6 @@ int	show_verbose = 0;
 int	show_jfs     = 0;
 int	flash_on     = 0;
 int	first_huge   = 1;
-int	first_steal  = 1;
 long	huge_peak    = 0;
 int	welcome      = 1;
 int	dotline      = 0;
@@ -422,8 +398,6 @@ int	show_rrd     = 0;
 int	show_lpar    = 0;
 int	show_vm    = 0;
 int	show_dgroup  = 0; /* disk groups */
-int	auto_dgroup  = 0; /* disk groups defined via -g auto */
-int	disk_only_mode  = 0; /* disk stats shows disks only if user used -g auto */
 int     dgroup_loaded = 0; /* 0 = no, 1=needed, 2=loaded */
 int	show_raw    = 0;
 
@@ -472,7 +446,7 @@ char tmpstr[71];
 			if(fgets(tmpstr, 70, pop) == NULL) 
 				break;
 			tmpstr[strlen(tmpstr)-1]=0; /* remove newline */
-			easy[i] = MALLOC(strlen(tmpstr)+1);
+			easy[i] = malloc(strlen(tmpstr)+1);
 			strcpy(easy[i],tmpstr);
 		}
 		pclose(pop);
@@ -484,7 +458,7 @@ char tmpstr[71];
 			if(fgets(tmpstr, 70, pop) == NULL) 
 				break;
 			tmpstr[strlen(tmpstr)-1]=0; /* remove newline */
-			lsb_release[i] = MALLOC(strlen(tmpstr)+1);
+			lsb_release[i] = malloc(strlen(tmpstr)+1);
 			strcpy(lsb_release[i],tmpstr);
 		}
 		pclose(pop);
@@ -593,7 +567,7 @@ char tmpstr[CMDLEN];
 			if(tmpstr[strlen(tmpstr)-1]== ' ')
 				tmpstr[strlen(tmpstr)-1]=0;
 			arglist[i].pid = atoi(tmpstr);
-			arglist[i].args = MALLOC(strlen(tmpstr));
+			arglist[i].args = malloc(strlen(tmpstr));
 			strcpy(arglist[i].args,&tmpstr[6]);
 		}
 		pclose(pop);
@@ -695,7 +669,7 @@ struct dsk_stat {
 	ulong	dk_bsize;
 	ulong	dk_time;
 	ulong	dk_inflight;
-	ulong	dk_backlog;
+	ulong	dk_11;
 	ulong	dk_partition;
 	ulong	dk_blocks; /* in /proc/partitions only */
 	ulong	dk_use;
@@ -773,51 +747,34 @@ long long pgrotated;
 };
 
 
-#define NFS_V2_NAMES_COUNT 18
-char *nfs_v2_names[NFS_V2_NAMES_COUNT] = {
+
+char *nfs_v2_names[18] = {
 	"null", "getattr", "setattr", "root", "lookup", "readlink",
 	"read", "wrcache", "write", "create", "remove", "rename",
 	"link", "symlink", "mkdir", "rmdir", "readdir", "fsstat"};
 
-#define NFS_V3_NAMES_COUNT 22
 char *nfs_v3_names[22] ={
 	 "null", "getattr", "setattr", "lookup", "access", "readlink",
 	 "read", "write", "create", "mkdir", "symlink", "mknod", 
 	 "remove", "rmdir", "rename", "link", "readdir", "readdirplus",
 	 "fsstat", "fsinfo", "pathconf", "commit"};
 
-#define NFS_V4S_NAMES_COUNT 72
-int nfs_v4s_names_count=NFS_V4S_NAMES_COUNT;
-char *nfs_v4s_names[NFS_V4S_NAMES_COUNT] = {  /* get these names from nfsstat as they are NOT documented */
-	"op0-unused",   "op1-unused",   "op2-future",   "access",       "close",        "commit",       /* 1 - 6 */
-	"create",       "delegpurge",   "delegreturn",  "getattr",      "getfh",        "link",         /* 7 - 12 */
-	"lock",         "lockt",        "locku",        "lookup",       "lookup_root",  "nverify",      /* 13 - 18 */
-	"open",         "openattr",     "open_conf",    "open_dgrd",    "putfh",        "putpubfh",     /* 19 - 24 */
-	"putrootfh",    "read",         "readdir",      "readlink",     "remove",       "rename",       /* 25 - 30 */
-	"renew",        "restorefh",    "savefh",       "secinfo",      "setattr",      "setcltid",     /* 31 - 36 */
-	"setcltidconf", "verify",       "write",        "rellockowner", "bc_ctl",	"blind_conn",	/* 37 - 42 */
-	"exchange_id",	"create_ses",	"destroy_ses",	"free_statid",	"getdirdelag",	"getdevinfo",	/* 43 - 48 */
-	"getdevlist",	"layoutcommit",	"layoutget",	"layoutreturn",	"secunfononam",	"sequence",	/* 49 - 54 */
-	"set_ssv",	"test_stateid",	"want_deleg",	"destory_clid",	"reclaim_comp",	"stat60",	/* 55 - 60 */
-	"stat61",	"stat62",	"stat63",	"stat64",	"stat65",	"stat66",	/* 61 - 66 */
-	"stat67",	"stat68",	"stat69",	"stat70",	"stat71",	"stat72"	/* 67 - 72 */
-	};
+char *nfs_v4s_names[40] = {
+	"op0-unused",   "op1-unused",   "op2-future",   "access",       "close",        "commit",      
+	"create",       "delegpurge",   "delegreturn",  "getattr",      "getfh",        "link",        
+	"lock",         "lockt",        "locku",        "lookup",       "lookup_root",  "nverify",     
+	"open",         "openattr",     "open_conf",    "open_dgrd",    "putfh",        "putpubfh",    
+	"putrootfh",    "read",         "readdir",      "readlink",     "remove",       "rename",      
+	"renew",        "restorefh",    "savefh",       "secinfo",      "setattr",      "setcltid",    
+	"setcltidconf", "verify",       "write",        "rellockowner" };
 
-#define NFS_V4C_NAMES_COUNT 60
-int nfs_v4c_names_count=NFS_V4C_NAMES_COUNT;
-char *nfs_v4c_names[NFS_V4C_NAMES_COUNT] = {  /* get these names from nfsstat as they are NOT documented */
-	"null",         "read",         "write",        "commit",       "open",         "open_conf",    /* 1 - 6 */
-	"open_noat",    "open_dgrd",    "close",        "setattr",      "fsinfo",       "renew",        /* 7 - 12 */
-	"setclntid",    "confirm",      "lock",         "lockt",        "locku",        "access",       /* 13 - 18 */
-	"getattr",      "lookup",       "lookup_root",  "remove",       "rename",       "link",         /* 19 - 24 */
-	"symlink",      "create",       "pathconf",     "statfs",       "readlink",     "readdir",      /* 25 - 30 */
-	"server_caps",  "delegreturn",  "getacl",       "setacl",       "fs_locations", "rel_lkowner",  /* 31 - 36 */
-	"secinfo",      "exchange_id",  "create_ses",   "destroy_ses",  "sequence",     "get_lease_t",  /* 37 - 42 */
-	"reclaim_comp", "layoutget",    "getdevinfo",   "layoutcommit", "layoutreturn", "getdevlist",	/* 43 - 48 */
-	"stat49", 	"stat50",       "stat51",       "stat52",       "start53", 	"stat54",	/* 49 - 54 */
-	"stat55", 	"stat56",       "stat57",       "stat58",       "start59", 	"stat60"	/* 55 - 60 */
-	};
-
+char *nfs_v4c_names[35] = {
+	"null",         "read",         "write",        "commit",       "open",         "open_conf",   
+	"open_noat",    "open_dgrd",    "close",        "setattr",      "fsinfo",       "renew",       
+	"setclntid",    "confirm",      "lock",         "lockt",        "locku",        "access",      
+	"getattr",      "lookup",       "lookup_root",  "remove",       "rename",       "link",        
+	"symlink",      "create",       "pathconf",     "statfs",       "readlink",     "readdir",     
+	"server_caps",  "delegreturn",  "getacl",       "setacl",       "fs_locations" };
 
 int nfs_v2c_found=0;
 int nfs_v2s_found=0;
@@ -828,12 +785,12 @@ int nfs_v4s_found=0;
 int nfs_clear=0;
 
 struct nfs_stat {
-	long v2c[NFS_V2_NAMES_COUNT];	/* verison 2 client */
-	long v3c[NFS_V3_NAMES_COUNT];	/* verison 3 client */
-	long v4c[NFS_V4C_NAMES_COUNT];	/* verison 4 client */
-	long v2s[NFS_V2_NAMES_COUNT];	/* verison 2 SERVER */
-	long v3s[NFS_V3_NAMES_COUNT];	/* verison 3 SERVER */
-	long v4s[NFS_V4S_NAMES_COUNT];	/* verison 4 SERVER */
+	long v2c[18];	/* verison 2 client */
+	long v3c[22];	/* verison 3 client */
+	long v4c[35];	/* verison 4 client */
+	long v2s[18];	/* verison 2 server */
+	long v3s[22];	/* verison 3 server */
+	long v4s[40];	/* verison 4 server */
 };
 
 #define NETMAX 32
@@ -877,31 +834,6 @@ struct part_stat {
 
 #ifdef POWER
 
-#define VM_UNKNOWN 0
-#define VM_POWERVM 1
-#define VM_POWERKVM_GUEST 2
-#define VM_POWERKVM_HOST 3
-#define VM_NATIVE 4
-int power_vm_type = VM_UNKNOWN;
-
-char endian[15] = "Unknown Endian";
-
-void get_endian()
-{
-FILE *pop;
-char tmpstr[64];
-
-	pop = popen("/usr/bin/lscpu | grep Byte", "r");
-	if(pop != NULL) {
-	    if(fgets(tmpstr, 63, pop) != NULL) {
-		tmpstr[strlen(tmpstr)-1]=0; /* remove newline */
-		endian[0]=0;
-		strncpy(endian,&tmpstr[23],14);
-	    }
-	    pclose(pop);
-	}
-}
-
 /* XXXXXXX need to test if rewind() worked or not for lparcfg */
 int lparcfg_reread=1;
 /* Reset at end of each interval so LPAR cfg is only read once each interval
@@ -914,8 +846,7 @@ struct {
 char version_string[16];		/*lparcfg 1.3 */
 int version;
 char serial_number[16];			/*HAL,0210033EA*/
-char system_type[64];			/*HAL,9124-720*/
-	/* new record is "IBM pSeries (emulated by qemu)" instead of "IBM 9119-MME" */
+char system_type[16];			/*HAL,9124-720*/
 int  partition_id;			/*11*/
 /* 
 R4=0x14
@@ -1039,7 +970,7 @@ int proc_lparcfg()
 static FILE *fp = (FILE *)-1;
 /* Only try to read /proc/ppc64/lparcfg once - remember if it's readable */
 static int lparinfo_not_available=0;
-int i;
+
 char *str;
 	/* If we already read and processed /proc/lparcfg in this interval - just return */
 	if( lparcfg_processed == 1)
@@ -1053,18 +984,6 @@ char *str;
 		error("failed to open - /proc/ppc64/lparcfg");
 		fp = (FILE *)-1;
 		lparinfo_not_available = 1;
-		if(power_vm_type == VM_UNKNOWN) {
-			/*  Heuristics for spotting PowerKVM Host
-				a) inside ifdef POWER so can't be x86
-				b) /proc/ppc64/lparcfg is missing
-				c) /etc/ *ease files have hints 
-			    Confirmed true for IBM_POWERKVM 2.1 
-			*/
-			if(strncmp( easy[1], "IBM_PowerKVM", 12) == 0)
-				power_vm_type = VM_POWERKVM_HOST;
-			else
-				power_vm_type = VM_NATIVE;
-		}
 		return 0;
 	   }
 	}
@@ -1073,30 +992,14 @@ char *str;
 		if(fgets(lpar_buffer[lpar_count],LPAR_LINE_WIDTH-1,fp) == NULL)
 			break; 
 	}
-	if(lparcfg_reread) { /* XXXX  unclear if close+open is necessary   - unfortunately this requires version many of Linux on POWER install to test early releases */
+	if(lparcfg_reread) { /* XXXX  unclear is close open is necessary   - unfortunately this requires version on Linux on POWER install to test early releases */
 		fclose(fp);
 		fp = (FILE *)-1;
 	} else rewind(fp);
 
 	str=locate("lparcfg");  	sscanf(str, "lparcfg %s", lparcfg.version_string);
 	str=locate("serial_number");	sscanf(str, "serial_number=%s", lparcfg.serial_number);
-	str=locate("system_type");	
-	for(i=0;i<strlen(str);i++) /* Remove new spaces in massive string meaning PowerKVM Guest !!*/
-		if(str[i] == ' ')
-			str[i] = '-';
-					sscanf(str, "system_type=%s", lparcfg.system_type);
-	if(power_vm_type == VM_UNKNOWN) {
-		/*  Heuristics for spotting PowerKVM Guest
-			a) inside ifdef POWER so can't be x86
-			b) we have a /proc/ppc64/lparcfg - probably mostly missing (1.9)
-			c) system type string includes "qemu" 
-		    Confirmed true for SLES11.3 RHEL6.5 and Ubuntu 14.4.1
-		*/
-		if(strstr( lparcfg.system_type, "(emulated-by-qemu)") == 0)
-			power_vm_type = VM_POWERVM; /* not found */
-		else
-			power_vm_type = VM_POWERKVM_GUEST;
-	}
+	str=locate("system_type");	sscanf(str, "system_type=%s", lparcfg.system_type);
 
 #define GETDATA(variable) lparcfg.variable = read_longlong( __STRING(variable) );
 
@@ -1181,7 +1084,7 @@ int diskmax = DISKMIN;
 
 /* Supports up to 780, but not POWER6 595 follow-up with POWER7 */
 /* XXXX needs rework to cope to with fairly rare but interesting higher numbers of CPU machines */
-#define CPUMAX (192 * 8) /* MAGIC COOKIE WARNING */
+#define CPUMAX 256
 
 struct data {
 	struct dsk_stat *dk;
@@ -1363,75 +1266,8 @@ void get_cpu_cnt()	{
                     cpus=i;
             else
                     break;
-    	}
-	if(cpus >=CPUMAX) {
-		printf("This nmon supports only %d CPU threads (Logical CPUs) and the machine appears to have %d.\nnmon stopping as its unsafe to continue.\n", CPUMAX, cpus);
-		exit(44);
-	}
+    }
 }
-#ifdef X86
-void get_intel_spec() {
-int i;
-int physicalcpu[256];
-int id;
-
-	/* Get CPU info from /proc/stat and populate proc[P_STAT] */
-	proc_read(P_CPUINFO);
-
-	for(i=0; i<256;i++)
-		physicalcpu[i]=0;
-
-	for(i=0; i<proc[P_CPUINFO].lines; i++) {
-		if(strncmp("vendor_id",proc[P_CPUINFO].line[i],9) == 0) {
-			vendor_ptr = &proc[P_CPUINFO].line[i][12];
-		}
-	}
-	for(i=0; i<proc[P_CPUINFO].lines; i++) {
-		if(strncmp("model name",proc[P_CPUINFO].line[i],10) == 0) {
-			model_ptr = &proc[P_CPUINFO].line[i][13];
-		}
-	}
-	for(i=0; i<proc[P_CPUINFO].lines; i++) {
-		if(strncmp("cpu MHz",proc[P_CPUINFO].line[i],7) == 0) {
-			mhz_ptr = &proc[P_CPUINFO].line[i][11];
-		}
-	}
-	for(i=0; i<proc[P_CPUINFO].lines; i++) {
-		if(strncmp("bogomips",proc[P_CPUINFO].line[i],8) == 0) {
-			bogo_ptr = &proc[P_CPUINFO].line[i][11];
-		}
-	}
-
-	for(i=0; i<proc[P_CPUINFO].lines; i++) {
-		if(strncmp("physical id",proc[P_CPUINFO].line[i],11) == 0) {
-			id = atoi(&proc[P_CPUINFO].line[i][15]);
-			if(id<256)
-			physicalcpu[id] = 1;
-		}
-	}
-	for(i=0; i<256;i++)
-		if(physicalcpu[i] == 1)
-			processorchips++;
-
-	/* Start with index [1] as [0] contains overall CPU statistics */
-	for(i=0; i<proc[P_CPUINFO].lines; i++) {
-		if(strncmp("siblings",proc[P_CPUINFO].line[i],8) == 0) {
-			siblings = atoi(&proc[P_CPUINFO].line[i][11]);
-			break;
-		}
-	}
-	for(i=0; i<proc[P_CPUINFO].lines; i++) {
-		if(strncmp("cpu cores",proc[P_CPUINFO].line[i],9) == 0) {
-			cores = atoi(&proc[P_CPUINFO].line[i][12]);
-			break;
-		}
-	}
-	if(siblings>cores) 
-		hyperthreads=siblings/cores;
-	else
-		hyperthreads=0;
-}
-#endif
 
 int stat8 = 0; /* used to determine the number of variables on a line */
 
@@ -1504,7 +1340,6 @@ long long steal;
 	p->cpu_total.softirq = softirq;
 	p->cpu_total.steal   = steal;
 	p->cpu_total.nice    = nice;
-
 #ifdef DEBUG
 	if(debug)fprintf(stderr,"XX user=%lld wait=%lld sys=%lld idle=%lld\n",
 			p->cpu_total.user,
@@ -1611,7 +1446,6 @@ void proc_nfs()
 int i;
 int j;
 int len;
-int lineno;
 
 /* sample /proc/net/rpc/nfs
 net 0 0 0 0
@@ -1621,40 +1455,31 @@ proc3 22 0 27364 0 32 828 22 40668 0 1 0 0 0 0 0 0 0 0 1212 6 2 1 0
 proc4 35 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 */
     if(proc[P_NFS].fp != 0) {
-	for(lineno=0;lineno<proc[P_NFS].lines;lineno++) {
-		if(!strncmp("proc2 ",proc[P_NFS].line[lineno],6)) {
-			/* client version 2 line readers "proc2 18 num num etc" */
-			len=strlen(proc[P_NFS].line[lineno]);
-			for(j=0,i=8;i<len && j<NFS_V2_NAMES_COUNT;i++) {
-				if(proc[P_NFS].line[lineno][i] == ' ') {
-					p->nfs.v2c[j] =atol(&proc[P_NFS].line[lineno][i+1]);
-					nfs_v2c_found=1;
-					j++;
-				}
-			}
+	/* client version 2 line readers "proc2 18 num num etc" */
+	len=strlen(proc[P_NFS].line[2]);
+	for(j=0,i=8;i<len && j<18;i++) {
+		if(proc[P_NFS].line[2][i] == ' ') {
+			p->nfs.v2c[j] =atol(&proc[P_NFS].line[2][i+1]);
+			nfs_v2c_found=1;
+			j++;
 		}
-		if(!strncmp("proc3 ",proc[P_NFS].line[lineno],6)) {
-			/* client version 3 line readers "proc3 22 num num etc" */
-			len=strlen(proc[P_NFS].line[lineno]);
-			for(j=0,i=8;i<len && j<NFS_V3_NAMES_COUNT;i++) {
-				if(proc[P_NFS].line[lineno][i] == ' ') {
-					p->nfs.v3c[j] =atol(&proc[P_NFS].line[lineno][i+1]);
-					nfs_v3c_found=1;
-					j++;
-				}
-			}
+	}
+	/* client version 3 line readers "proc3 22 num num etc" */
+	len=strlen(proc[P_NFS].line[3]);
+	for(j=0,i=8;i<len && j<22;i++) {
+		if(proc[P_NFS].line[3][i] == ' ') {
+			p->nfs.v3c[j] =atol(&proc[P_NFS].line[3][i+1]);
+			nfs_v3c_found=1;
+			j++;
 		}
-		if(!strncmp("proc4 ",proc[P_NFS].line[lineno],6)) {
-			/* client version 4 line readers "proc4 35 num num etc" */
-			nfs_v4c_names_count = atoi(&proc[P_NFS].line[lineno][6]);
-			len=strlen(proc[P_NFS].line[lineno]);
-			for(j=0,i=8; i<len && j<nfs_v4c_names_count; i++) {
-				if(proc[P_NFS].line[lineno][i] == ' ') {
-					p->nfs.v4c[j] =atol(&proc[P_NFS].line[lineno][i+1]);
-					nfs_v4c_found=1;
-					j++;
-				}
-			}
+	}
+	/* client version 4 line readers "proc4 35 num num etc" */
+	len=strlen(proc[P_NFS].line[4]);
+	for(j=0,i=8;i<len && j<35;i++) {
+		if(proc[P_NFS].line[4][i] == ' ') {
+			p->nfs.v4c[j] =atol(&proc[P_NFS].line[4][i+1]);
+			nfs_v4c_found=1;
+			j++;
 		}
 	}
     }
@@ -1672,43 +1497,33 @@ proc4 2 0 0
 proc4ops 40 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 */
     if(proc[P_NFSD].fp != 0) {
-		for(lineno=0;lineno<proc[P_NFSD].lines;lineno++) {
-			if(!strncmp("proc2 ",proc[P_NFSD].line[lineno],6)) {
-				/* server version 2 line readers "proc2 18 num num etc" */
-				len=strlen(proc[P_NFSD].line[lineno]);
-				for(j=0,i=8;i<len && j<NFS_V2_NAMES_COUNT;i++) {
-					if(proc[P_NFSD].line[lineno][i] == ' ') {
-						p->nfs.v2s[j] =atol(&proc[P_NFSD].line[lineno][i+1]);
-						nfs_v2s_found=1;
-						j++;
-					}
-				}
-			}
-			if(!strncmp("proc3 ",proc[P_NFSD].line[lineno],6)) {
-				/* server version 3 line readers "proc3 22 num num etc" */
-				len=strlen(proc[P_NFSD].line[lineno]);
-				for(j=0,i=8;i<len && j<NFS_V2_NAMES_COUNT;i++) {
-					if(proc[P_NFSD].line[lineno][i] == ' ') {
-						p->nfs.v3s[j] =atol(&proc[P_NFSD].line[lineno][i+1]);
-						nfs_v3s_found=1;
-						j++;
-					}
-				}
-			}
-			if(!strncmp("proc4ops ",proc[P_NFSD].line[lineno],9)) {
-				/* server version 4 line readers "proc4ops 40 num num etc"  
-					NOTE: the "ops" hence starting in column 9 */ 
-				nfs_v4s_names_count = atol(&proc[P_NFSD].line[lineno][9]);
-				len=strlen(proc[P_NFSD].line[lineno]);
-				for(j=0,i=11; i<len && j<nfs_v4s_names_count; i++) {
-					if(proc[P_NFSD].line[lineno][i] == ' ') {
-						p->nfs.v4s[j] =atol(&proc[P_NFSD].line[lineno][i+1]);
-						nfs_v4s_found=1;
-						j++;
-					}
-				}
-			}
-	    }
+	/* server version 2 line readers "proc2 18 num num etc" */
+	len=strlen(proc[P_NFSD].line[7]);
+	for(j=0,i=8;i<len && j<18;i++) {
+		if(proc[P_NFSD].line[2][i] == ' ') {
+			p->nfs.v2s[j] =atol(&proc[P_NFSD].line[7][i+1]);
+			nfs_v2s_found=1;
+			j++;
+		}
+	}
+	/* server version 3 line readers "proc3 22 num num etc" */
+	len=strlen(proc[P_NFSD].line[8]);
+	for(j=0,i=8;i<len && j<22;i++) {
+		if(proc[P_NFS].line[3][i] == ' ') {
+			p->nfs.v3s[j] =atol(&proc[P_NFSD].line[8][i+1]);
+			nfs_v3s_found=1;
+			j++;
+		}
+	}
+	/* server version 4 line readers "proc4ops 40 num num etc"  NOTE: the "ops" hence starting in column 11 */ 
+	len=strlen(proc[P_NFSD].line[10]);
+	for(j=0,i=11;i<len && j<40;i++) {
+		if(proc[P_NFS].line[3][i] == ' ') {
+			p->nfs.v4s[j] =atol(&proc[P_NFSD].line[10][i+1]);
+			nfs_v4s_found=1;
+			j++;
+		}
+	}
     }
 }
 
@@ -1841,7 +1656,7 @@ int ret;
 		p->dk[i].dk_wmsec =
 		p->dk[i].dk_inflight =
 		p->dk[i].dk_time =
-		p->dk[i].dk_backlog =0;
+		p->dk[i].dk_11 =0;
 
 		ret = sscanf(&buf[0], "%d %d %s %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu",
 			&p->dk[i].dk_major,
@@ -1857,7 +1672,7 @@ int ret;
 			&p->dk[i].dk_wmsec,
 			&p->dk[i].dk_inflight,
 			&p->dk[i].dk_time,
-			&p->dk[i].dk_backlog );
+			&p->dk[i].dk_11 );
 		if(ret == 7) { /* shuffle the data around due to missing columns for partitions */
 			p->dk[i].dk_partition = 1;
 			p->dk[i].dk_wkb = p->dk[i].dk_rmsec;
@@ -2081,7 +1896,6 @@ struct {
 	double kernel;
 	double iowait;
 	double idle;
-	double steal;
 } cpu_snap[MAX_SNAPS];
 
 int snap_average()
@@ -2109,7 +1923,6 @@ int i;
 		cpu_snap[i].kernel = 0;
 		cpu_snap[i].iowait = 0;
 		cpu_snap[i].idle = 0;
-		cpu_snap[i].steal= 0;
 	}
 	next_cpu_snap=0;
 	cpu_snap_all=0;
@@ -2120,7 +1933,7 @@ void plot_snap(WINDOW *pad)
 int i;
 int j;
 	if (cursed) {
-		mvwprintw(pad,0, 0, " CPU +---Long-Term-------------------------------------------------------------+");
+		mvwprintw(pad,0, 0, " CPU +-------------------------------------------------------------------------+");
 		mvwprintw(pad,1, 0,"100%%-|");
 		mvwprintw(pad,2, 1, "95%%-|");
 		mvwprintw(pad,3, 1, "90%%-|");
@@ -2142,44 +1955,43 @@ int j;
 		mvwprintw(pad,19, 1,"10%%-|");
 		mvwprintw(pad,20, 1," 5%%-|");
 
-		mvwprintw(pad,21, 4, " +-------------------------------------------------------------------------+");
  		if (colour){
+ 			mvwprintw(pad,21, 4, " +--------------------");
  			COLOUR wattrset(pad, COLOR_PAIR(2));
- 			mvwprintw(pad,0, 26, "User%%");
- 			COLOUR wattrset(pad, COLOR_PAIR(1));
- 			mvwprintw(pad,0, 36, "System%%");
- 			COLOUR wattrset(pad, COLOR_PAIR(4));
- 			mvwprintw(pad,0, 49, "Wait%%");
- 			COLOUR wattrset(pad, COLOR_PAIR(5));
- 			mvwprintw(pad,0, 59, "Steal%%");
+ 			mvwprintw(pad,21, 26, "User%%");
  			COLOUR wattrset(pad, COLOR_PAIR(0));
-		} 
+ 			mvwprintw(pad,21, 30, "---------");
+ 			COLOUR wattrset(pad, COLOR_PAIR(1));
+ 			mvwprintw(pad,21, 39, "System%%");
+ 			COLOUR wattrset(pad, COLOR_PAIR(0));
+ 			mvwprintw(pad,21, 45, "---------");
+ 			COLOUR wattrset(pad, COLOR_PAIR(4));
+ 			mvwprintw(pad,21, 54, "Wait%%");
+ 			COLOUR wattrset(pad, COLOR_PAIR(0));
+ 			mvwprintw(pad,21, 58, "---------------------+");
+		} else {
+			mvwprintw(pad,21, 4, " +-------------------------------------------------------------------------+");
+		}
 
 		for (j = 0; j < MAX_SNAPS; j++) {
 			for (i = 0; i < MAX_SNAP_ROWS; i++) {
 				wmove(pad,MAX_SNAP_ROWS-i, j+SNAP_OFFSET);
-				if (cpu_snap[j].user + cpu_snap[j].kernel + cpu_snap[j].iowait + cpu_snap[j].idle + cpu_snap[j].steal == 0) { /* if not all zeros */
-					COLOUR wattrset(pad,COLOR_PAIR(0));
-					wprintw(pad," ");
-				} else if( (cpu_snap[j].user / 100 * MAX_SNAP_ROWS) > i+0.5) {
+				if( (cpu_snap[j].user / 100 * MAX_SNAP_ROWS) > i+0.5) {
 					COLOUR wattrset(pad,COLOR_PAIR(9));
 					wprintw(pad,"U");
+					COLOUR wattrset(pad,COLOR_PAIR(0));
 				} else if( (cpu_snap[j].user + cpu_snap[j].kernel )/ 100 * MAX_SNAP_ROWS > i+0.5) {
 					COLOUR wattrset(pad,COLOR_PAIR(8));
 					wprintw(pad,"s");
-				} else if( (cpu_snap[j].user + cpu_snap[j].kernel + cpu_snap[j].iowait )/ 100 * MAX_SNAP_ROWS > i+0.5) {  
+					COLOUR wattrset(pad,COLOR_PAIR(0));
+				} else if( (cpu_snap[j].user + cpu_snap[j].kernel +cpu_snap[j].iowait )/ 100 * MAX_SNAP_ROWS > i+0.5) {
 					COLOUR wattrset(pad,COLOR_PAIR(10));
 					wprintw(pad,"w");
-				} else if( (cpu_snap[j].user + cpu_snap[j].kernel + cpu_snap[j].iowait + cpu_snap[j].idle)/ 100 * MAX_SNAP_ROWS > i) { /*no +0.5 or too few Steal's */
 					COLOUR wattrset(pad,COLOR_PAIR(0));
+				} else 
 					wprintw(pad," ");
-				} else if (cpu_snap[j].user + cpu_snap[j].kernel + cpu_snap[j].iowait + cpu_snap[j].idle + cpu_snap[j].steal > i) { /* if not all zeros */
-					COLOUR wattrset(pad,COLOR_PAIR(5));
-					wprintw(pad,"S");
-					} 
 			}
 		}
-		COLOUR wattrset(pad,COLOR_PAIR(0));
 		for (i = 0; i < MAX_SNAP_ROWS; i++) {
 			wmove(pad,MAX_SNAP_ROWS-i, next_cpu_snap+SNAP_OFFSET);
 			wprintw(pad,"|");
@@ -2197,13 +2009,12 @@ int j;
 }
 
 /* This saves the CPU overall usage for later ploting on the screen */
-void save_snap(double user, double kernel, double iowait, double idle, double steal)
+void plot_save(double user, double kernel, double iowait, double idle)
 {
 	cpu_snap[next_cpu_snap].user = user;
 	cpu_snap[next_cpu_snap].kernel = kernel;
 	cpu_snap[next_cpu_snap].iowait = iowait;
 	cpu_snap[next_cpu_snap].idle = idle;
-	cpu_snap[next_cpu_snap].steal = steal;
 	next_cpu_snap++;
 	if(next_cpu_snap >= MAX_SNAPS) {
 		next_cpu_snap=0;
@@ -2218,7 +2029,7 @@ void save_smp(WINDOW *pad, int cpu_no, int row, long user, long kernel, long iow
 static int firsttime = 1;
 	if (cursed) {
 		mvwprintw(pad,row,0, "%3d usr=%4ld sys=%4ld wait=%4ld idle=%4ld steal=%2ld nice=%4ld irq=%2ld sirq=%2ld\n",
-		cpu_no, user, kernel, iowait, idle, steal, nice, irq, softirq);
+		cpu_no, user, kernel, iowait, idle, steal, nice, irq, softirq, steal);
 		return;
 	}
 	if(firsttime) {
@@ -2235,7 +2046,7 @@ static int firsttime = 1;
 	}
 }
 
-void plot_smp(WINDOW *pad, int cpu_no, int row, double user, double kernel, double iowait, double idle, double steal)
+void plot_smp(WINDOW *pad, int cpu_no, int row, double user, double kernel, double iowait, double idle)
 {
 	int	i;
 	int	peak_col;
@@ -2253,61 +2064,44 @@ void plot_smp(WINDOW *pad, int cpu_no, int row, double user, double kernel, doub
 		mvwprintw(pad,row,  3, "% 6.1lf", user);
 		mvwprintw(pad,row,  9, "% 6.1lf", kernel);
 		mvwprintw(pad,row, 15, "% 6.1lf", iowait);
-		if(steal) {
-			mvwprintw(pad,row, 21, "% 6.1lf", steal);
-		} else {
-			mvwprintw(pad,row, 21, "% 6.1lf", idle);
-		}
+		mvwprintw(pad,row, 21, "% 6.1lf", idle);
 		mvwprintw(pad,row, 27, "|");
 		wmove(pad,row, 28);
 		for (i = 0; i < (int)(user   / 2); i++){
 			COLOUR wattrset(pad,COLOR_PAIR(9));
 			wprintw(pad,"U");
+			COLOUR wattrset(pad,COLOR_PAIR(0));
 		}
 		for (i = 0; i < (int)(kernel / 2); i++){
 			COLOUR wattrset(pad,COLOR_PAIR(8));
 			wprintw(pad,"s");
+			COLOUR wattrset(pad,COLOR_PAIR(0));
 		}
 		for (i = 0; i < (int)(iowait / 2); i++) {
 			COLOUR wattrset(pad,COLOR_PAIR(10));
 			wprintw(pad,"W");
+			COLOUR wattrset(pad,COLOR_PAIR(0));
 		}
-		COLOUR wattrset(pad,COLOR_PAIR(0));
-		for (i = 0; i <= (int)(idle   / 2); i++) {  /* added "=" to try to conteract missing halves */
-#ifdef POWER
-			if( lparcfg.smt_mode > 1 && ((cpu_no -1) % lparcfg.smt_mode) == 0 && (i % 2)) 
-				wprintw(pad,".");
-			else
-#endif
-				wprintw(pad," ");
-		}
-		for (i = 0; i < (int)((steal+1)  / 2); i++) {
-			COLOUR wattrset(pad,COLOR_PAIR(5));
-			wprintw(pad,"S");
-		}
-		COLOUR wattrset(pad,COLOR_PAIR(0));
-		mvwprintw(pad,row, 77, "| ");
+		for (i = 0; i < (int)(idle   / 2); i++)
+			wprintw(pad," ");
+		mvwprintw(pad,row, 77, "|");
 		
-		peak_col = 28 +(int)(cpu_peak[cpu_no]/2);
+		peak_col = 29 +(int)(cpu_peak[cpu_no]/2);
 		if(peak_col > 77)
 			peak_col=77;
 		mvwprintw(pad,row, peak_col, ">");
 	} else {
 	/* Sanity check the numnbers */
-		if( user < 0.0 || kernel < 0.0 || iowait < 0.0 || idle < 0.0 || idle >100.0 || steal <0 ) {
-			user = kernel = iowait = idle = steal = 0;
+		if( user < 0.0 || kernel < 0.0 || iowait < 0.0 || idle < 0.0 || idle >100.0) {
+			user = kernel = iowait = idle = 0;
 		}
-	
-		if(first_steal && steal >0 ) {
-			fprintf(fp,"AAA,steal,1\n");
-			first_steal=0;
-		}	
+		
 		if(cpu_no == 0)
-			fprintf(fp,"CPU_ALL,%s,%.1lf,%.1lf,%.1lf,%.1f,%.1lf,,%d\n", LOOP,
-			    user, kernel, iowait, idle, steal, cpus);
+			fprintf(fp,"CPU_ALL,%s,%.1lf,%.1lf,%.1lf,%.1lf,,%d\n", LOOP,
+			    user, kernel, iowait, idle,cpus);
 		else {
-			fprintf(fp,"CPU%03d,%s,%.1lf,%.1lf,%.1lf,%.1lf,%.1f\n", cpu_no, LOOP,
-			    user, kernel, iowait, idle, steal );
+			fprintf(fp,"CPU%03d,%s,%.1lf,%.1lf,%.1lf,%.1lf\n", cpu_no, LOOP,
+			    user, kernel, iowait, idle);
 		}
 	}
 }
@@ -2458,9 +2252,9 @@ char	*getuser(uid_t uid)
 				return u[i].name;
 			}
 		}
-		u = (struct user_info *)REALLOC(u, (sizeof(struct user_info ) * (i + 1)));
+		u = (struct user_info *)realloc(u, (sizeof(struct user_info ) * (i + 1)));
 	} else
-		u = (struct user_info *)MALLOC(sizeof(struct user_info ));
+		u = (struct user_info *)malloc(sizeof(struct user_info ));
 	used++;
 
 	/* failed to find a match so add it */
@@ -2532,12 +2326,6 @@ void load_dgroup(struct dsk_stat *dk)
 	for (dgroup_total_groups = 0; 
 		fgets(line, 4096-1, gp) != NULL && dgroup_total_groups < DGROUPS; 
 		dgroup_total_groups++) {
-		/* ignore lines starting with # */
-		if(line[0] == '#' ) { /* was a comment line */
-			/* Decrement dgroup_total_groups by 1 to correct index for next loop */
-			--dgroup_total_groups;
-			continue;
-		}
 		/* save the name */
 		nextp = save_word(line, name);
 		if(strlen(name) == 0) { /* was a blank line */
@@ -2590,8 +2378,6 @@ void list_dgroup(struct dsk_stat *dk)
 		fprintf(fp, "\n");
 	   }
 	*/
-	if( !show_dgroup) return;
-
 	for (n = 0, i = 0; i < dgroup_total_groups; i++) {
 		if (first) {
 			fprintf(fp, "BBBG,%03d,User Defined Disk Groups Name,Disks\n", n++);
@@ -2691,25 +2477,15 @@ void list_dgroup(struct dsk_stat *dk)
 				fprintf(fp, ",%s", dgroup_name[i]);
 		}
 		fprintf(fp, "\n");
-		fprintf(fp, "DGBACKLOG,Disk Group Backlog time (ms) %s", hostname);
+#ifdef EXPERIMENTAL
+		fprintf(fp, "DGF11,Disk Group field 11 %s", hostname);
 		for (i = 0; i < DGROUPS; i++) {
 			if (dgroup_name[i] != 0)
 				fprintf(fp, ",%s", dgroup_name[i]);
 		}
 		fprintf(fp, "\n");
+#endif /*EXPERIMENTAL*/
 	}
-}
-
-int is_dgroup_name(char *name)
-{
-int i;
-	for (i = 0; i < DGROUPS; i++) {
-		if(dgroup_name[i] == (char *)0 ) 
-			return 0;
-		if (strncmp(name,dgroup_name[i],strlen(name)) == 0)
-			return 1;
-	}
-	return 0;
 }
 
 
@@ -2737,13 +2513,12 @@ void help(void)
 	printf("Version - %s\n\n",SccsId);
 	printf("For Interactive-Mode\n");
 	printf("\t-s <seconds>  time between refreshing the screen [default 2]\n");
-	printf("\t-c <number>   count of screen refreshes [default millions]\n");
+	printf("\t-c <number>   of refreshes [default millions]\n");
 	printf("\t-g <filename> User Defined Disk Groups [hit g to show them]\n");
 	printf("\t              - file = on each line: group_name <disks list> space separated\n");
 	printf("\t              - like: database sdb sdc sdd sde\n");
 	printf("\t              - upto 64 disk groups, 512 disks per line\n");
 	printf("\t              - disks can appear more than once and in many groups\n");
-	printf("\t-g auto       - will make a file called \"auto\" with just disks fron \"lsblk|grep disk\" output\n");
 	printf("\t-b            black and white [default is colour]\n");
 	printf("\texample: %s -s 1 -c 100\n",progname);
 	printf("\n");
@@ -2760,8 +2535,6 @@ void help(void)
 	printf("\t-d <disks>    to increase the number of disks [default 256]\n");
 	printf("\t-l <dpl>      disks/line default 150 to avoid spreadsheet issues. EMC=64.\n");
 	printf("\t-g <filename> User Defined Disk Groups (see above) - see BBBG & DG lines\n");
-	printf("\t-g auto       As above but makes the file \"auto\" for you of just the disks like sda etc.\n");
-	printf("\t-D            Use with -g to add the Disk wait/service time & inflight stats.\n");
 
 	printf("\t-N            include NFS Network File System\n");
 	printf("\t-I <percent>  Include process & disks busy threshold (default 0.1)\n");
@@ -2798,10 +2571,8 @@ void help(void)
 	printf("\td   = Disk I/O Graphs\n");
 	printf("\tD   = Disk I/O Stats\n");
 	printf("\to   = Disk I/O Map (one character per disk showing how busy it is)\n");
-	printf("\tg   = User Defined Disk Groups        (assumes -g <file> when nmon started)\n");
-	printf("\tG   = Change Disk stats to just disks (assumes -g auto   when nmon started)\n");
+	printf("\to   = User Defined Disk Groups\n");
 	printf("\tj   = File Systems \n");
-	printf("\tt   = Top Process stats: select the data & order 1=Basic, 3=Perf 4=Size 5=I/O=root only\n");
 	printf("\tt   = Top Process stats use 1,3,4,5 to select the data & order\n");
 	printf("\tu   = Top Process full command details\n");
 	printf("\tv   = Verbose mode - tries to make recommendations\n");
@@ -2914,8 +2685,6 @@ static int jfs_loaded = 0;
 
 /* We order this array rather than the actual process tables
  * the index is the position in the process table and
- * the size is the memory used  in bytes
- * the io is the storge I/O performed in the the last period in bytes 
  * the time is the CPU used in the last period in seconds
  */
 struct topper {
@@ -2938,7 +2707,7 @@ int	size_compare(const void *a, const void *b)
 	return (int)((((struct topper *)b)->size - ((struct topper *)a)->size));
 }
 
-int	disk_compare(const void *a, const void *b)
+int	disk_compare(void *a, void *b)
 {
 	return (int)((((struct topper *)b)->io - ((struct topper *)a)->io));
 }
@@ -3003,7 +2772,7 @@ int checkinput(void)
 						show_top = 1;
 						show_topmode =3;
 					}
-					wclear(paddisk);
+					clear();
 					break;
 				case '?':
 				case 'h':
@@ -3014,7 +2783,7 @@ int checkinput(void)
 						show_help = 1;
 						show_verbose = 0;
 					}
-					wclear(padhelp);
+					clear();
 					break;
 				case 'b':
 				case 'B':
@@ -3024,41 +2793,45 @@ int checkinput(void)
 				case 'Z':
 					FLIP(show_raw);
 					show_smp=1;
-					wclear(padsmp);
+					clear();
 					break;
 				case 'l':
 					FLIP (show_longterm);
-					wclear(padlong);
+					clear();
 					break;
-#ifdef POWER
 				case 'p':
 					FLIP(show_lpar);
-					wclear(padlpar);
+					clear();
 					break;
-#endif
 				case 'V':
 					FLIP(show_vm);
-					wclear(padpage);
+					clear();
 					break;
 				case 'j':
 				case 'J':
 					FLIP(show_jfs);
 					jfs_load(show_jfs);
-					wclear(padjfs);
+					clear();
 					break;
+#ifdef PARTITIONS
+				case 'P':
+					FLIP(show_partitions);
+					clear();
+					break;
+#endif /*PARTITIONS*/
 				case 'k':
 				case 'K':
 					FLIP(show_kernel);
-					wclear(padker);
+					clear();
 					break;
 				case 'm':
 				case 'M':
 					FLIP(show_memory);
-					wclear(padmem);
+					clear();
 					break;
 				case 'L':
 					FLIP(show_large);
-					wclear(padlarge);
+					clear();
 					break;
 				case 'D':
 					switch (show_disk) {
@@ -3072,7 +2845,7 @@ int checkinput(void)
 						show_disk = SHOW_DISK_STATS; 
 						break;
 					}
-					wclear(paddisk);
+					clear();
 					break;
 				case 'd':
 					switch (show_disk) {
@@ -3086,12 +2859,12 @@ int checkinput(void)
 						show_disk = 0; 
 						break;
 					}
-					wclear(paddisk);
+					clear();
 					break;
 				case 'o':
 				case 'O':
 					FLIP(show_diskmap);
-					wclear(padmap);
+					clear();
 					break;
 				case 'n':
 					if (show_net) {
@@ -3101,7 +2874,7 @@ int checkinput(void)
 						show_net = 1;
 						show_neterror = 3;
 					}
-					wclear(padnet);
+					clear();
 					break;
 				case 'N':
 					if(show_nfs == 0)
@@ -3109,31 +2882,29 @@ int checkinput(void)
 					else if(show_nfs == 1)
 						show_nfs = 2;
 					else if(show_nfs == 2)
-						show_nfs = 3;
-					else if(show_nfs == 3)
 						show_nfs = 0;
 					nfs_clear=1;
-					wclear(padnfs);
+					clear();
 					break;
 				case 'c':
 				case 'C':
 					FLIP(show_smp);
-					wclear(padsmp);
+					clear();
 					break;
 				case 'r':
 				case 'R':
 					FLIP(show_cpu);
-					wclear(padcpu);
+					clear();
 					break;
 				case 't':
 					show_topmode = 3; /* Fall Through */
 				case 'T':
 					FLIP(show_top);
-					wclear(padtop);
+					clear();
 					break;
 				case 'v':
 					FLIP(show_verbose);
-					wclear(padverb);
+					clear();
 					break;
 				case 'u':
 					if (show_args == ARGS_NONE) {
@@ -3146,12 +2917,12 @@ int checkinput(void)
 						 show_topmode = 3;
 					} else 
 						show_args = ARGS_NONE;
-					wclear(padtop);
+					clear();
 					break;
 				case '1':
 					show_topmode = 1;
 					show_top = 1;
-					wclear(padtop);
+					clear();
 					break;
 /*
 				case '2':
@@ -3163,19 +2934,17 @@ int checkinput(void)
 				case '3':
 					show_topmode = 3;
 					show_top = 1;
-					wclear(padtop);
+					clear();
 					break;
 				case '4':
 					show_topmode = 4;
 					show_top = 1;
-					wclear(padtop);
+					clear();
 					break;
 				case '5':
-					if(isroot) {
-						show_topmode = 5;
-						show_top = 1;
-						wclear(padtop);
-					}
+					show_topmode = 5;
+					show_top = 1;
+					clear();
 					break;
 				case '0':
 					for(i=0;i<(max_cpus+1);i++)
@@ -3197,15 +2966,9 @@ int checkinput(void)
 				case ' ':
 					clear();
 					break;
-				case 'G':
-					if(auto_dgroup) {
-						FLIP(disk_only_mode);
-						clear();
-					}
-                                        break;
 				case 'g':
 					FLIP(show_dgroup);
-                                        wclear(paddg);
+                                        clear();
                                         break;
 
 				default: return 0;
@@ -3235,6 +2998,7 @@ void go_background(int def_loops, int def_secs)
 	show_all     = 1;
 	show_top     = 0; /* top process */
 	show_topmode = 3;
+	show_partitions = 1;
 	show_lpar = 1;
 	show_vm   = 1;
 }
@@ -3307,7 +3071,6 @@ char buf[1024*4];
 int size=0;
 int ret=0;
 int count=0;
-int i;
 
 	sprintf(filename,"/proc/%d/stat",pid);
 	if( (fp = fopen(filename,"r")) == NULL) {
@@ -3436,28 +3199,8 @@ int i;
 		fprintf(stderr,"sscanf wanted 7 returned = %d line=%s\n", ret,buf);
 		return 0;
 	}
-	if(isroot) {
-		p->procs[index].read_io = 0;
-		p->procs[index].write_io = 0;
-		sprintf(filename,"/proc/%d/io",pid);
-		if( (fp = fopen(filename,"r")) != NULL) {
-			for(i=0;i<6;i++) {
-				if(fgets(buf,1024,fp) == NULL) {
-					break;
-				}
-				if(strncmp("read_bytes:",  buf, 11) == 0 )
-					sscanf(&buf[12], "%lld", &p->procs[index].read_io);
-				if(strncmp("write_bytes:", buf, 12) == 0 )
-					sscanf(&buf[13], "%lld", &p->procs[index].write_io);
-			}	
-		} 
-
-		if (fp != NULL) 
-			fclose(fp); 
-	}
 	return 1;
 }
-
 #ifdef DEBUGPROC 
 print_procs(int index)
 {
@@ -3651,7 +3394,6 @@ int main(int argc, char **argv)
 	int cpu_user;
 	int cpu_sys;
 	int cpu_wait;
-	int cpu_steal;
 	int	n=0;			/* reusable counters */
 	int	i=0;
 	int	j=0;
@@ -3675,7 +3417,7 @@ int main(int argc, char **argv)
 #endif /* POWER */
 	int	smp_first_time =1;
 	int	proc_first_time =1;
-	int	first_key_pressed = 0;
+	pid_t	firstproc = (pid_t)0;
 	pid_t childpid = -1;
 	int ralfmode = 0;
 	char	pgrp[32];
@@ -3713,6 +3455,7 @@ int main(int argc, char **argv)
 	float fs_free;
 	float fs_size_used;
 	char cmdstr[256];
+	int disk_stats_read = 0;
 	int updays, uphours, upmins;
 	float v2c_total;
 	float v2s_total;
@@ -3720,7 +3463,27 @@ int main(int argc, char **argv)
 	float v3s_total;
 	float v4c_total;
 	float v4s_total;
+	int room =1;
 	int errors=0;
+	WINDOW * padmem = NULL;
+	WINDOW * padlarge = NULL;
+	WINDOW * padpage = NULL;
+	WINDOW * padker = NULL;
+	WINDOW * padres = NULL;
+	WINDOW * padnet = NULL;
+	WINDOW * padneterr = NULL;
+	WINDOW * padnfs = NULL;
+	WINDOW * padcpu = NULL;
+	WINDOW * padsmp = NULL;
+	WINDOW * padlong = NULL;
+	WINDOW * paddisk = NULL;
+	WINDOW * paddg = NULL;
+	WINDOW * padmap = NULL;
+	WINDOW * padtop = NULL;
+	WINDOW * padjfs = NULL;
+	WINDOW * padlpar = NULL;
+	WINDOW * padverb = NULL;
+	WINDOW * padhelp = NULL;
 
         char  *nmon_start = (char *)NULL;
         char  *nmon_end   = (char *)NULL;
@@ -3733,13 +3496,7 @@ int main(int argc, char **argv)
          */
         int   time_stamp_type =0;
         unsigned long  pagesize = 1024*4; /* Default page size is 4 KB but newer servers compiled with 64 KB pages */
-	float average;
-	struct timeval nmon_tv; /* below is used to workout the nmon run, accumalate it and the 
-				   allow for in in the sleep time  to reduce time drift */
-	double nmon_start_time = 0.0;
-	double nmon_end_time = 0.0;
-	double nmon_run_time = -1.0;	
-	int seconds_over = 0;
+
 
 #define MAXROWS 256
 #define MAXCOLS 150 /* changed to allow maximum column widths */
@@ -3753,11 +3510,12 @@ int main(int argc, char **argv)
 
 #define DISPLAY(pad,rows) { \
                         if(x+2+(rows)>LINES)\
-                                pnoutrefresh(pad, 0,0,x,1,LINES-2, COLS-2); \
+                                pnoutrefresh(pad, 0,0,x,1,LINES-2,COLS-2); \
                         else \
                                 pnoutrefresh(pad, 0,0,x,1,x+rows+1,COLS-2); \
                         x=x+(rows);     \
                         if(x+4>LINES) { \
+                                room=0; \
                                 mvwprintw(stdscr,LINES-1,10,"Warning: Some Statistics may not shown"); \
                         }               \
                        }
@@ -3828,9 +3586,6 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 			hostname[i] = 0;
 	if(run_name_set == 0)
 		strcpy(run_name,hostname);
-
-	if( getuid() == 0)
-		isroot=1;
 
 	/* Check the version of OS */
 	uname(&uts);
@@ -3929,7 +3684,7 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 			if(disks_per_line < 3 || disks_per_line >250) disks_per_line = 100;
 			break;
 		case 'C': /* commandlist argument */
-			cmdlist[0] = MALLOC(strlen(optarg)+1); /* create buffer */
+			cmdlist[0] = malloc(strlen(optarg)+1); /* create buffer */
 			strcpy(cmdlist[0],optarg);
 			if(cmdlist[0][0]!= 0)
 				cmdfound=1;
@@ -3951,16 +3706,6 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
                         show_dgroup = 1;
                         dgroup_loaded = 1;
                         dgroup_filename = optarg;
-			if( strncmp("auto",dgroup_filename,5) == 0) {
-				auto_dgroup++;
-				printf("Generating disk group file from lsblk output to file: \"auto\"\n");
-				ret = system("lsblk --nodeps --output NAME,TYPE --raw | grep disk | awk 'BEGIN {printf \"# This file created by: nmon -g auto\\n# It is an automatically generated disk-group file which excluses disk paritions\\n\" } { printf \"%s %s\\n\", $1, $1 }' >auto");
-				if(ret != 0 ) {
-					printf("Create auto file command was: %s\n", 
-						"lsblk --nodeps --output NAME,TYPE --raw | grep disk | awk '{ printf \"%s %s\\n\", $1, $1 }' >auto"); 
-					printf("Creating auto file returned a status of %d\n", ret );
-				}
-			}
                         break;
 		}
 	}
@@ -3989,9 +3734,7 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 	/* Determine number of active LOGICAL cpu - depends on SMT mode ! */
 	get_cpu_cnt();
 	max_cpus=old_cpus=cpus;
-#ifdef X86
-	get_intel_spec();
-#endif
+
 	proc_read(P_STAT);
 	proc_cpu();
 	proc_read(P_UPTIME);
@@ -3999,26 +3742,26 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 	proc_kernel();
 	memcpy(&q->cpu_total, &p->cpu_total, sizeof(struct cpu_stat));
 
-	p->dk = MALLOC(sizeof(struct dsk_stat) * diskmax+1);	
-	q->dk = MALLOC(sizeof(struct dsk_stat) * diskmax+1);	
-	disk_busy_peak = MALLOC(sizeof(double) * diskmax);
-	disk_rate_peak = MALLOC(sizeof(double) * diskmax);
+	p->dk = malloc(sizeof(struct dsk_stat) * diskmax+1);	
+	q->dk = malloc(sizeof(struct dsk_stat) * diskmax+1);	
+	disk_busy_peak = malloc(sizeof(double) * diskmax);
+	disk_rate_peak = malloc(sizeof(double) * diskmax);
 	for(i=0;i<diskmax;i++) {
 		disk_busy_peak[i]=0.0;
 		disk_rate_peak[i]=0.0;
 	}
 
-	cpu_peak = MALLOC(sizeof(double) * (CPUMAX + 1)); /* MAGIC */
+	cpu_peak = malloc(sizeof(double) * (CPUMAX + 1)); /* MAGIC */
 	for(i=0;i < max_cpus+1;i++)
 		cpu_peak[i]=0.0;
 
 	n = getprocs(0);
-	p->procs = MALLOC(sizeof(struct procsinfo ) * n  +8);
-	q->procs = MALLOC(sizeof(struct procsinfo ) * n  +8);
+	p->procs = malloc(sizeof(struct procsinfo ) * n  +8);
+	q->procs = malloc(sizeof(struct procsinfo ) * n  +8);
 	p->nprocs = q->nprocs = n;
 
 	/* Initialise the top processes table */
-	topper = MALLOC(sizeof(struct topper ) * topper_size); /* round up */
+	topper = malloc(sizeof(struct topper ) * topper_size); /* round up */
 
 	/* Get Disk Stats. */
 	proc_disk(0.0);
@@ -4072,10 +3815,7 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
         	COLOUR start_color();
                 COLOUR init_pairs();
 		clear();
-#ifdef POWER
 		padlpar = newpad(11,MAXCOLS);
-#endif
-		padwelcome = newpad(24,MAXCOLS);
 		padmap = newpad(24,MAXCOLS);
 		padhelp = newpad(24,MAXCOLS);
 		padmem = newpad(20,MAXCOLS);
@@ -4091,6 +3831,7 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 		padjfs = newpad(MAXROWS,MAXCOLS);
 		padker = newpad(5,MAXCOLS);
 		padverb = newpad(8,MAXCOLS);
+		padres = newpad(23,MAXCOLS);
 		padnfs = newpad(25,MAXCOLS);
 		padtop = newpad(MAXROWS,MAXCOLS*2);
 
@@ -4163,16 +3904,6 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 #else
 		fprintf(fp,"AAA,cpus,%d\n", cpus);
 #endif
-#ifdef X86
-		fprintf(fp,"AAA,x86,VendorId,%s\n",       vendor_ptr);
-		fprintf(fp,"AAA,x86,ModelName,%s\n",      model_ptr);
-		fprintf(fp,"AAA,x86,MHz,%s\n",            mhz_ptr);
-		fprintf(fp,"AAA,x86,bogomips,%s\n",       bogo_ptr);
-		fprintf(fp,"AAA,x86,ProcessorChips,%d\n", processorchips);
-		fprintf(fp,"AAA,x86,Cores,%d\n",          cores);
-		fprintf(fp,"AAA,x86,hyperthreads,%d\n",   hyperthreads);
-		fprintf(fp,"AAA,x86,VirtualCPUs,%d\n",    cpus);
-#endif
 		fprintf(fp,"AAA,proc_stat_variables,%d\n", stat8);
 
 		fprintf(fp,"AAA,note0, Warning - use the UNIX sort command to order this file before loading into a spreadsheet\n");
@@ -4182,8 +3913,8 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 		fflush(NULL);
 
 		for (i = 1; i <= cpus; i++)
-			fprintf(fp,"CPU%03d,CPU %d %s,User%%,Sys%%,Wait%%,Idle%%,Steal%%\n", i, i, run_name);
-		fprintf(fp,"CPU_ALL,CPU Total %s,User%%,Sys%%,Wait%%,Idle%%,Steal%%,Busy,CPUs\n", run_name);
+			fprintf(fp,"CPU%03d,CPU %d %s,User%%,Sys%%,Wait%%,Idle%%\n", i, i, run_name);
+		fprintf(fp,"CPU_ALL,CPU Total %s,User%%,Sys%%,Wait%%,Idle%%,Busy,CPUs\n", run_name);
 		fprintf(fp,"MEM,Memory MB %s,memtotal,hightotal,lowtotal,swaptotal,memfree,highfree,lowfree,swapfree,memshared,cached,active,bigfree,buffers,swapcached,inactive\n", run_name);
 
 #ifdef POWER
@@ -4203,17 +3934,17 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 */
 
 
-		fprintf(fp,"NET,Network I/O %s", run_name);
+		fprintf(fp,"NET,Network I/O %s,", run_name);
 		for (i = 0; i < networks; i++)
-			fprintf(fp,",%-2s-read-KB/s", (char *)p->ifnets[i].if_name);
+			fprintf(fp,"%-2s-read-KB/s,", (char *)p->ifnets[i].if_name);
 		for (i = 0; i < networks; i++)
-			fprintf(fp,",%-2s-write-KB/s", (char *)p->ifnets[i].if_name);
+			fprintf(fp,"%-2s-write-KB/s,", (char *)p->ifnets[i].if_name);
 		fprintf(fp,"\n");
-		fprintf(fp,"NETPACKET,Network Packets %s", run_name);
+		fprintf(fp,"NETPACKET,Network Packets %s,", run_name);
 		for (i = 0; i < networks; i++)
-			fprintf(fp,",%-2s-read/s,", (char *)p->ifnets[i].if_name);
+			fprintf(fp,"%-2s-read/s,", (char *)p->ifnets[i].if_name);
 		for (i = 0; i < networks; i++)
-			fprintf(fp,",%-2s-write/s,", (char *)p->ifnets[i].if_name);
+			fprintf(fp,"%-2s-write/s,", (char *)p->ifnets[i].if_name);
 		/* iremoved as it is not below in the BUSY line fprintf(fp,"\n"); */
 #ifdef DEBUG
 		if(debug)printf("disks=%d x%sx\n",(char *)disks,p->dk[0].dk_name);
@@ -4263,8 +3994,8 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 		for (k = 0; k < jfses; k++) {
   		    if(jfs[k].mounted && strncmp(jfs[k].name,"/proc",5)
   		    			&& strncmp(jfs[k].name,"/sys",4)
-					&& strncmp(jfs[k].name,"/run/",5)
-					&& strncmp(jfs[k].name,"/dev/",5)
+  		    			&& strncmp(jfs[k].name,"/dev/pts",8)
+					&& strncmp(jfs[k].name,"/dev/shm",8)
 					&& strncmp(jfs[k].name,"/var/lib/nfs/rpc",16)
 			)  /* /proc gives invalid/insane values */
 			fprintf(fp,",%s", jfs[k].name); 
@@ -4272,8 +4003,8 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 		fprintf(fp,"\n");
 		jfs_load(UNLOAD);
 #ifdef POWER
-		if( proc_lparcfg() && lparcfg.shared_processor_mode != 0 && power_vm_type == VM_POWERVM) {
-			fprintf(fp,"LPAR,Shared CPU LPAR Stats %s,PhysicalCPU,capped,shared_processor_mode,system_potential_processors,system_active_processors,pool_capacity,MinEntCap,partition_entitled_capacity,partition_max_entitled_capacity,MinProcs,Logical CPU,partition_active_processors,partition_potential_processors,capacity_weight,unallocated_capacity_weight,BoundThrds,MinMem,unallocated_capacity,pool_idle_time,smt_mode\n",hostname);
+		if( proc_lparcfg() && lparcfg.shared_processor_mode != 0 ){
+			fprintf(fp,"LPAR,Shared CPU LPAR Stats %s,PhysicalCPU,capped,shared_processor_mode,system_potential_processors,system_active_processors,pool_capacity,MinEntCap,partition_entitled_capacity,partition_max_entitled_capacity,MinProcs,Logical CPU,partition_active_processors,partition_potential_processors,capacity_weight,unallocated_capacity_weight,BoundThrds,MinMem,unallocated_capacity,pool_idle_time\n",hostname);
 
 		}
 #endif /*POWER*/
@@ -4285,12 +4016,9 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 			fprintf(fp,"TOP,+PID,Time,%%CPU,%%Usr,%%Sys,Size,ResSet,ResText,ResData,ShdLib,MinorFault,MajorFault,Command,Threads,IOwaitTime\n");
 #endif
 		}
-		linux_bbbp("/etc/release",     "/bin/cat /etc/*ease 2>/dev/null", WARNING);
-		linux_bbbp("lsb_release",      "/usr/bin/lsb_release -a 2>/dev/null", WARNING);
+		linux_bbbp("/etc/release",    "/bin/cat /etc/*ease 2>/dev/null", WARNING);
+		linux_bbbp("lsb_release",    "/usr/bin/lsb_release -a 2>/dev/null", WARNING);
 		linux_bbbp("fdisk-l",          "/sbin/fdisk -l 2>/dev/null", WARNING);
-		linux_bbbp("lsblk",            "/usr/bin/lsblk 2>/dev/null", WARNING);
-		linux_bbbp("lscpu",            "/usr/bin/lscpu 2>/dev/null", WARNING);
-		linux_bbbp("lshw",             "/usr/bin/lshw 2>/dev/null", WARNING);
 		linux_bbbp("/proc/cpuinfo",    "/bin/cat /proc/cpuinfo 2>/dev/null", WARNING);
 		linux_bbbp("/proc/meminfo",    "/bin/cat /proc/meminfo 2>/dev/null", WARNING);
 		linux_bbbp("/proc/stat",       "/bin/cat /proc/stat 2>/dev/null", WARNING);
@@ -4302,21 +4030,6 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 		linux_bbbp("ppc64_utils - ls-veth",   	"/usr/sbin/ls-veth 2>/dev/null", WARNING);
 		linux_bbbp("ppc64_utils - ls-vscsi",   	"/usr/sbin/ls-vscsi 2>/dev/null", WARNING);
 		linux_bbbp("ppc64_utils - lsmcode",   	"/usr/sbin/lsmcode 2>/dev/null", WARNING);
-		linux_bbbp("ppc64_cpu - smt",   	"/usr/sbin/ppc64_cpu --smt 2>/dev/null", WARNING);
-		linux_bbbp("ppc64_cpu - cores",   	"/usr/sbin/ppc64_cpu --cores-present 2>/dev/null", WARNING);
-		linux_bbbp("ppc64_cpu - DSCR",   	"/usr/sbin/ppc64_cpu --dscr 2>/dev/null", WARNING);
-		linux_bbbp("ppc64_cpu - snooze",   	"/usr/sbin/ppc64_cpu --smt-snooze-delay 2>/dev/null", WARNING);
-		linux_bbbp("ppc64_cpu - run-mode",   	"/usr/sbin/ppc64_cpu --run-mode 2>/dev/null", WARNING);
-		linux_bbbp("ppc64_cpu - frequency",   	"/usr/sbin/ppc64_cpu --frequency 2>/dev/null", WARNING);
-
-		linux_bbbp("bootlist -m nmonal -o",   	"/usr/sbin/bootlist -m normal -o 2>/dev/null", WARNING);
-		linux_bbbp("lsslot",            	"/usr/sbin/lsslot      2>/dev/null", WARNING);
-		linux_bbbp("lparstat -i",            	"/usr/sbin/lparstat -i 2>/dev/null", WARNING);
-		linux_bbbp("lsdevinfo",            	"/usr/sbin/lsdevinfo 2>/dev/null", WARNING);
-		linux_bbbp("ls-vdev",            	"/usr/sbin/ls-vdev  2>/dev/null", WARNING);
-		linux_bbbp("ls-veth",            	"/usr/sbin/ls-veth  2>/dev/null", WARNING);
-		linux_bbbp("ls-vscsi",            	"/usr/sbin/ls-vscsi 2>/dev/null", WARNING);
-
 #endif
 		linux_bbbp("/proc/diskinfo",   "/bin/cat /proc/diskinfo 2>/dev/null", WARNING);
 		linux_bbbp("/proc/diskstats",   "/bin/cat /proc/diskstats 2>/dev/null", WARNING);
@@ -4332,12 +4045,14 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 #ifndef KERNEL_2_6_18
 		linux_bbbp("/proc/1/statm",    "/bin/cat /proc/1/statm 2>/dev/null", WARNING);
 #endif
+#ifdef POWER
+		linux_bbbp("/proc/ppc64/lparcfg",    "/bin/cat /proc/ppc64/lparcfg 2>/dev/null", WARNING);
+#endif
 #ifdef MAINFRAME
 		linux_bbbp("/proc/sysinfo",    "/bin/cat /proc/sysinfo 2>/dev/null", WARNING);
 #endif
 		linux_bbbp("/proc/net/rpc/nfs",        "/bin/cat /proc/net/rpc/nfs 2>/dev/null", WARNING);
 		linux_bbbp("/proc/net/rpc/nfsd",        "/bin/cat /proc/net/rpc/nfsd 2>/dev/null", WARNING);
-		linux_bbbp("/proc/modules",    "/bin/cat /proc/modules 2>/dev/null", WARNING);
 		linux_bbbp("ifconfig",        "/sbin/ifconfig 2>/dev/null", WARNING);
 		linux_bbbp("/bin/df-m",        "/bin/df -m 2>/dev/null", WARNING);
 		linux_bbbp("/bin/mount",        "/bin/mount 2>/dev/null", WARNING);
@@ -4346,16 +4061,11 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 		linux_bbbp("uptime",    "/usr/bin/uptime  2>/dev/null", WARNING);
 		linux_bbbp("getconf PAGESIZE",    "/usr/bin/getconf PAGESIZE  2>/dev/null", WARNING);
 
-#ifdef POWER
-		linux_bbbp("/proc/ppc64/lparcfg",    "/bin/cat /proc/ppc64/lparcfg 2>/dev/null", WARNING);
-		linux_bbbp("lscfg-v",    "/usr/sbin/lscfg -v 2>/dev/null", WARNING);
-#endif
 		sleep(1); /* to get the first stats to cover this one second and avoids divide by zero issues */
 	     }
 	/* To get the pointers setup */
 	/* Was already done earlier, DONT'T switch back here to the old pointer! - switcher(); */
-	/*checkinput();*/
-	clear();
+	checkinput();
 	fflush(NULL);
 #ifdef POWER 
 lparcfg.timebase = -1; 
@@ -4384,6 +4094,8 @@ lparcfg.timebase = -1;
 		proc_lparcfg();
 #endif
 
+		disk_stats_read = 0;
+
 		if(loop <= 3) /* This stops the nmon causing the cpu peak at startup */
 			for(i=0;i < max_cpus+1;i++)
 				cpu_peak[i]=0.0;
@@ -4405,97 +4117,30 @@ lparcfg.timebase = -1;
 
 			if(welcome && getenv("NMON") == 0) {
 
-					COLOUR wattrset(padwelcome,COLOR_PAIR(2));
-mvwprintw(padwelcome,x+1, 3, "------------------------------");
-mvwprintw(padwelcome,x+2, 3, "#    #  #    #   ####   #    #");
-mvwprintw(padwelcome,x+3, 3, "##   #  ##  ##  #    #  ##   #");
-mvwprintw(padwelcome,x+4, 3, "# #  #  # ## #  #    #  # #  #");
-mvwprintw(padwelcome,x+5, 3, "#  # #  #    #  #    #  #  # #");
-mvwprintw(padwelcome,x+6, 3, "#   ##  #    #  #    #  #   ##");
-mvwprintw(padwelcome,x+7, 3, "#    #  #    #   ####   #    #");
-mvwprintw(padwelcome,x+8, 3, "------------------------------");
-					COLOUR wattrset(padwelcome,COLOR_PAIR(0));
-mvwprintw(padwelcome,x+1, 40, "For help type H or ...");
-mvwprintw(padwelcome,x+2, 40, " nmon -?  - hint");
-mvwprintw(padwelcome,x+3, 40, " nmon -h  - full");
-mvwprintw(padwelcome,x+5, 40, "To start the same way every time");
-mvwprintw(padwelcome,x+6, 40, " set the NMON ksh variable");
-					COLOUR wattrset(padwelcome,COLOR_PAIR(1));
-#ifdef POWER
-get_cpu_cnt();
-proc_read(P_CPUINFO);
+					COLOUR attrset(COLOR_PAIR(2));
+mvprintw(x+1, 3, "------------------------------");
+mvprintw(x+2, 3, "#    #  #    #   ####   #    #");
+mvprintw(x+3, 3, "##   #  ##  ##  #    #  ##   #");
+mvprintw(x+4, 3, "# #  #  # ## #  #    #  # #  #");
+mvprintw(x+5, 3, "#  # #  #    #  #    #  #  # #");
+mvprintw(x+6, 3, "#   ##  #    #  #    #  #   ##");
+mvprintw(x+7, 3, "#    #  #    #   ####   #    #");
+mvprintw(x+8, 3, "------------------------------");
+					COLOUR attrset(COLOR_PAIR(0));
+mvprintw(x+1, 40, "For help type H or ...");
+mvprintw(x+2, 40, " nmon -?  - hint");
+mvprintw(x+3, 40, " nmon -h  - full");
+mvprintw(x+5, 40, "To start the same way every time");
+mvprintw(x+6, 40, " set the NMON ksh variable");
 
-get_endian();
-
-switch(power_vm_type) {
-case VM_POWERKVM_GUEST: 
-get_cpu_cnt();
-#ifdef RHEL7
-	mvwprintw(padwelcome,x+ 9, 3, "%s %s", easy[0], easy[1]);
-#else
-#ifdef SLES113
-	mvwprintw(padwelcome,x+ 9, 3, "%s", easy[2]);
-#else
-	mvwprintw(padwelcome,x+ 9, 3, "%s", easy[3]);
-#endif /* SLES113 */
-#endif /* RHEL7 */
-	mvwprintw(padwelcome,x+10, 3, "PowerKVM Guest %s", &proc[P_CPUINFO].line[1][7]);
-	mvwprintw(padwelcome,x+11, 3, "PowerKVM Guest VirtualCPUs=%d LogicalCPUs=%d", (int)lparcfg.partition_active_processors, cpus);
-	mvwprintw(padwelcome,x+12, 3, "PowerKVM Guest SMT=%d", lparcfg.smt_mode);
-	break;
-case VM_POWERKVM_HOST:
-	mvwprintw(padwelcome,x+ 9, 3, "%s", easy[0]);
-	mvwprintw(padwelcome,x+10, 3, "PowerKVM Host %s", &proc[P_CPUINFO].line[1][7]);
-	mvwprintw(padwelcome,x+11, 3, "PowerKVM Host owns all %d CPUs & SMT=off in the Hosting OS", cpus);
-	mvwprintw(padwelcome,x+12, 3, "PowerKVM Host %s", proc[P_CPUINFO].line[proc[P_CPUINFO].lines-2]);
-	break;
-case VM_NATIVE:
-	mvwprintw(padwelcome,x+ 9, 3, "%s", easy[0]);
-	mvwprintw(padwelcome,x+10, 3, "Native %s", &proc[P_CPUINFO].line[1][7]);
-	mvwprintw(padwelcome,x+11, 3, "Native owns all %d CPUs & SMT=off in the Hosting OS", cpus);
-	mvwprintw(padwelcome,x+12, 3, "Native %s", proc[P_CPUINFO].line[proc[P_CPUINFO].lines-2]);
-	break;
-default:
-case VM_POWERVM:
-#ifdef SLES113
-	mvwprintw(padwelcome,x+ 9, 3, "%s %s", easy[0],easy[2]);
-#else
-#ifdef RHEL7
-	mvwprintw(padwelcome,x+ 9, 3, "%s %s", easy[0],easy[1]);
-#else
-	mvwprintw(padwelcome,x+ 9, 3, "%s", easy[3]);
-#endif
-#endif
-	mvwprintw(padwelcome,x+10, 3, "PowerVM %s %s", &proc[P_CPUINFO].line[1][7], &proc[P_CPUINFO].line[proc[P_CPUINFO].lines-1][11]);
-	mvwprintw(padwelcome,x+11, 3, "PowerVM Entitlement=%-6.2f VirtualCPUs=%d LogicalCPUs=%d", 
-		(double)lparcfg.partition_entitled_capacity/100.0, (int)lparcfg.partition_active_processors, cpus);
-	mvwprintw(padwelcome,x+12, 3, "PowerVM SMT=%d Capped=%d", lparcfg.smt_mode, lparcfg.capped);
-	break;
-}
-
-mvwprintw(padwelcome,x+13, 3, "Processor Clock=%s             %s", &proc[P_CPUINFO].line[2][9], endian);
-
-#endif
-#ifdef X86
-get_cpu_cnt();
-mvwprintw(padwelcome,x+10, 3, "x86 %s %s", vendor_ptr, model_ptr);
-mvwprintw(padwelcome,x+11, 3, "x86 MHz=%s bogomips=%s", mhz_ptr,bogo_ptr);
-if(processorchips || cores || hyperthreads || cpus) {
-mvwprintw(padwelcome,x+12, 3, "x86 ProcessorChips=%d PhyscalCores=%d", processorchips, cores);
-mvwprintw(padwelcome,x+13, 3, "x86 Hyperthreads  =%d VirtualCPUs =%d", hyperthreads, cpus);
-}
-#endif
-					COLOUR wattrset(padwelcome,COLOR_PAIR(0));
-mvwprintw(padwelcome,x+15, 3, "Use these keys to toggle statistics on/off:");
-mvwprintw(padwelcome,x+16, 3, "   c = CPU        l = CPU Long-term   - = Faster screen updates");
-mvwprintw(padwelcome,x+17, 3, "   m = Memory     j = Filesystems     + = Slower screen updates");
-mvwprintw(padwelcome,x+18, 3, "   d = Disks      n = Network         V = Virtual Memory");
-mvwprintw(padwelcome,x+19, 3, "   r = Resource   N = NFS             v = Verbose hints");
-mvwprintw(padwelcome,x+20, 3, "   k = kernel     t = Top-processes   . = only busy disks/procs");
-mvwprintw(padwelcome,x+21, 3, "   h = more options                   q = Quit");
-				pnoutrefresh(padwelcome, 0,0,x,1,LINES-2,COLS-2);
-				wnoutrefresh(stdscr);
-				x = x + 22;
+mvprintw(x+10, 3, "Use these keys to toggle statistics on/off:");
+mvprintw(x+11, 3, "   c = CPU        l = CPU Long-term   - = Faster screen updates");
+mvprintw(x+12, 3, "   m = Memory     j = Filesystems     + = Slower screen updates");
+mvprintw(x+13, 3, "   d = Disks      n = Network         V = Virtual Memory");
+mvprintw(x+14, 3, "   r = Resource   N = NFS             v = Verbose hints");
+mvprintw(x+15, 3, "   k = kernel     t = Top-processes   . = only busy disks/procs");
+mvprintw(x+16, 3, "   h = more options                   q = Quit");
+				x = x + 17;
 			}
 		} else {
 			if (!cursed && nmon_snap && (loop % nmon_one_in) == 0 ) {
@@ -4540,7 +4185,7 @@ mvwprintw(padwelcome,x+21, 3, "   h = more options                   q = Quit");
 			DISPLAY(padhelp,20);
 
 		}
-/* for debugging use only
+/*
 		if(error_on && errorstr[0] != 0) {
 			mvprintw(x, 0, "Error: %s  ",errorstr);
 			x = x + 1;
@@ -4562,20 +4207,7 @@ mvwprintw(padwelcome,x+21, 3, "   h = more options                   q = Quit");
 			mvwprintw(padcpu,8, 4, "cpuinfo: %s", proc[P_CPUINFO].line[proc[P_CPUINFO].lines-1]);
 			/* needs lparcfg to be already processed */
 			proc_lparcfg();
-			switch ( power_vm_type) {
-			case VM_POWERKVM_GUEST:
-				mvwprintw(padcpu,9, 4, "PowerKVM Guest Physcal CPU:%d & Virtual CPU (SMT):%d  %s", lparcfg.partition_active_processors, cpus, endian);
-				break;	
-			case VM_POWERKVM_HOST:
-				mvwprintw(padcpu,9, 4, "PowerKVM Host Physical CPU:%d  %s", cpus, endian);
-				break;	
-			case VM_POWERVM:
-				mvwprintw(padcpu,9, 4, "PowerVM Physcal CPU:%d & Logical CPU:%d  %s", lparcfg.partition_active_processors, cpus, endian);
-				break;
-			case VM_NATIVE:
-				mvwprintw(padcpu,9, 4, "Native Mode Physical CPU:%d  %s", cpus, endian);
-				break;	
-			}
+			mvwprintw(padcpu,9, 4, "phys/virt CPUs:%3d  logical CPU (SMT):%3d", lparcfg.partition_active_processors, cpus);
 #else 
 #ifdef MAINFRAME
 			mvwprintw(padcpu,5, 4, "cpuinfo: %s", proc[P_CPUINFO].line[1]);
@@ -4583,18 +4215,10 @@ mvwprintw(padwelcome,x+21, 3, "   h = more options                   q = Quit");
 			mvwprintw(padcpu,7, 4, "cpuinfo: %s", proc[P_CPUINFO].line[3]);
 			mvwprintw(padcpu,8, 4, "cpuinfo: %s", proc[P_CPUINFO].line[4]);
 #else /* Intel is the default */
-mvwprintw(padcpu,5, 4, "cpuinfo: %s %s", vendor_ptr, model_ptr);
-mvwprintw(padcpu,6, 4, "cpuinfo: Hz=%s bogomips=%s", mhz_ptr,bogo_ptr);
-if(processorchips || cores || hyperthreads || cpus) {
-mvwprintw(padcpu,7, 4, "cpuinfo: ProcessorChips=%d PhyscalCores=%d", processorchips, cores);
-mvwprintw(padcpu,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthreads, cpus);
-}
-/*
 			mvwprintw(padcpu,5, 4, "cpuinfo: %s", proc[P_CPUINFO].line[4]);
 			mvwprintw(padcpu,6, 4, "cpuinfo: %s", proc[P_CPUINFO].line[1]);
 			mvwprintw(padcpu,7, 4, "cpuinfo: %s", proc[P_CPUINFO].line[6]);
 			mvwprintw(padcpu,8, 4, "cpuinfo: %s", proc[P_CPUINFO].line[17]);
-*/
 #endif /*MAINFRAME*/
 			mvwprintw(padcpu,9, 4, "# of CPUs: %d", cpus);
 #endif /*POWER*/
@@ -4617,16 +4241,13 @@ mvwprintw(padcpu,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthread
 				cpu_sys  = p->cpu_total.sys  - q->cpu_total.sys; 
 				cpu_wait = p->cpu_total.wait - q->cpu_total.wait; 
 				cpu_idle = p->cpu_total.idle - q->cpu_total.idle; 
-				cpu_steal= p->cpu_total.steal- q->cpu_total.steal; 
- /* DEBUG inject steal       cpu_steal = cpu_sys; */
-				cpu_sum = cpu_idle + cpu_user + cpu_sys + cpu_wait + cpu_steal;
+				cpu_sum = cpu_idle + cpu_user + cpu_sys + cpu_wait;
 
-				save_snap(
+				plot_save(
 				    (double)cpu_user / (double)cpu_sum * 100.0,
 				    (double)cpu_sys  / (double)cpu_sum * 100.0,
 				    (double)cpu_wait / (double)cpu_sum * 100.0,
-				    (double)cpu_idle / (double)cpu_sum * 100.0,
-				    (double)cpu_steal/ (double)cpu_sum * 100.0);
+				    (double)cpu_idle / (double)cpu_sum * 100.0);
 				plot_snap(padlong);
 				DISPLAY(padlong,MAX_SNAP_ROWS+2);
 		}
@@ -4665,20 +4286,14 @@ mvwprintw(padcpu,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthread
 					mvwprintw(padsmp,1, 0, cpu_line);
 					mvwprintw(padsmp,2, 0, "CPU  ");
 					COLOUR wattrset(padsmp, COLOR_PAIR(2));
-					mvwprintw(padsmp,2, 4, "User%%");
+					mvwprintw(padsmp,2, 5, "User%%");
 					COLOUR wattrset(padsmp, COLOR_PAIR(1));
-					mvwprintw(padsmp,2, 9, "  Sys%%");
+					mvwprintw(padsmp,2, 10, "  Sys%%");
 					COLOUR wattrset(padsmp, COLOR_PAIR(4));
-					mvwprintw(padsmp,2, 15, " Wait%%");
-					if(p->cpu_total.steal != q->cpu_total.steal){
-						COLOUR wattrset(padsmp, COLOR_PAIR(5));
-						mvwprintw(padsmp,2, 22, "Steal");
-					} else {
-						COLOUR wattrset(padsmp, COLOR_PAIR(0));
-						mvwprintw(padsmp,2, 22, " Idle");
-					}
+					mvwprintw(padsmp,2, 16, " Wait%%");
 					COLOUR wattrset(padsmp, COLOR_PAIR(0));
-					mvwprintw(padsmp,2, 27, "|0          |25         |50          |75       100|");
+					mvwprintw(padsmp,2, 22, " Idle|0          |25         |50          |75       100|");
+
 				}	/* if (show_smp) AND if(cursed) */
 				proc_read(P_STAT);
 				proc_cpu();
@@ -4700,14 +4315,12 @@ mvwprintw(padcpu,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthread
 							}
 						}
 						else {
-							/* PowerKVM Host or Guest or Native have not Entitlement stats */
-							if(power_vm_type == VM_POWERVM)
-								mvwprintw(padsmp,1,30,"EntitledCPU=% 6.3f",
-									(double)lparcfg.partition_entitled_capacity/100.0);
-							/* Only if the calculation is working */
-							if(lparcfg.purr_diff != 0 ) 
-								mvwprintw(padsmp,1,50,"PhysicalCPUused=% 7.3f",
-									(double)lparcfg.purr_diff/(double)lparcfg.timebase/elapsed);
+							if( lparcfg.purr_diff == 0 ) {
+								mvwprintw(padsmp,1,29," Phys. CPU used: <not available>");
+							} else {
+								mvwprintw(padsmp,1,29," Phys. CPU used:% 7.2f ",
+										(double)lparcfg.purr_diff/(double)lparcfg.timebase/elapsed);
+							}
 						}
 					}
 				}
@@ -4717,33 +4330,19 @@ mvwprintw(padcpu,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthread
 					cpu_sys  = p->cpuN[i].sys  - q->cpuN[i].sys;
 					cpu_wait = p->cpuN[i].wait - q->cpuN[i].wait;
 					cpu_idle = p->cpuN[i].idle - q->cpuN[i].idle;
-					cpu_steal= p->cpuN[i].steal- q->cpuN[i].steal;
-/* DEBUG inject steal       cpu_steal = cpu_sys; */
-					cpu_sum = cpu_idle + cpu_user + cpu_sys + cpu_wait + cpu_steal;
+					cpu_sum = cpu_idle + cpu_user + cpu_sys + cpu_wait;
 					/* Check if we had a CPU # change and have to set idle to 100 */
 					if( cpu_sum == 0)
 						cpu_sum = cpu_idle = 100.0;
 					if(smp_first_time && cursed) {
-						if(i == 0) 
-							mvwprintw(padsmp,3 + i, 27, "| Please wait gathering CPU statistics");
-						else
-							mvwprintw(padsmp,3 + i, 27, "|");
-						mvwprintw(padsmp,3 + i, 77, "|");
+						mvwprintw(padsmp,3 + i, 27, "| Please wait gathering data");
 					} else {
-#ifdef POWER
-						/* lparcfg gathered above */
-						if( lparcfg.smt_mode > 1 &&  i % lparcfg.smt_mode == 0) {
-							mvwprintw(padsmp,3 + i, 27, "*");
-							mvwprintw(padsmp,3 + i, 77, "*"); 
-						}
-#endif
 						if(!show_raw)
 							plot_smp(padsmp,i+1, 3 + i,
 							(double)cpu_user / (double)cpu_sum * 100.0,
 							(double)cpu_sys  / (double)cpu_sum * 100.0,
 							(double)cpu_wait / (double)cpu_sum * 100.0,
-							(double)cpu_idle / (double)cpu_sum * 100.0,
-							(double)cpu_steal / (double)cpu_sum * 100.0);
+							(double)cpu_idle / (double)cpu_sum * 100.0);
 						else
 							save_smp(padsmp,i+1, 3+i,
 							  RAW(user) - RAW(nice),
@@ -4754,14 +4353,6 @@ mvwprintw(padcpu,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthread
 							  RAW(irq),
 							  RAW(softirq),
 							  RAW(steal));
-#ifdef POWER
-						/* lparcfg gathered above */
-						if( lparcfg.smt_mode > 1 &&  i % lparcfg.smt_mode == 0) {
-							mvwprintw(padsmp,3 + i, 27, "*");
-							mvwprintw(padsmp,3 + i, 77, "*"); 
-						}
-#endif
-
 					   RRD fprintf(fp,"rrdtool update cpu%02d.rrd %s:%.1f:%.1f:%.1f:%.1f\n",i,LOOP,
 						(double)cpu_user / (double)cpu_sum * 100.0,
 						(double)cpu_sys  / (double)cpu_sum * 100.0,
@@ -4770,51 +4361,21 @@ mvwprintw(padcpu,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthread
 					}
 				}	/* for (i = 0; i < cpus; i++) */
 				CURSE mvwprintw(padsmp,i + 3, 0, cpu_line);
-#ifdef POWER
-				/* proc_lparcfg called above in previous ifdef
-				 */
-					if( lparcfg.shared_processor_mode == 1)	{
-						if(lparcfg.timebase == -1) {
-							lparcfg.timebase=0;
-							proc_read(P_CPUINFO);
-							for(i=0;i<proc[P_CPUINFO].lines-1;i++) {
-								if(!strncmp("timebase",proc[P_CPUINFO].line[i],8)) {
-									sscanf(proc[P_CPUINFO].line[i],"timebase : %lld",&lparcfg.timebase);
-									break;
-								}
-							}
-						}
-						else {
-								mvwprintw(padsmp,i+3,29,"%s", lparcfg.shared_processor_mode ? "Shared": "Dedicsted");
-								mvwprintw(padsmp,i+3,39,"|");
-								/* PowerKVM has no Capped concept */
-								if(power_vm_type == VM_POWERVM)
-								mvwprintw(padsmp,i+3,41,"%s", lparcfg.capped ? "--Capped": "Uncapped");
-								mvwprintw(padsmp,i+3,51,"|");
-								mvwprintw(padsmp,i+3,54,"SMT=%d", lparcfg.smt_mode);
-								mvwprintw(padsmp,i+3,64,"|");
-								mvwprintw(padsmp,i+3,67,"VP=%.0f", (float)lparcfg.partition_active_processors);
-						}
-					}
-#endif
 				cpu_user = p->cpu_total.user - q->cpu_total.user;
 				cpu_sys  = p->cpu_total.sys  - q->cpu_total.sys;
 				cpu_wait = p->cpu_total.wait - q->cpu_total.wait;
 				cpu_idle = p->cpu_total.idle - q->cpu_total.idle;
-				cpu_steal= p->cpu_total.steal- q->cpu_total.steal;
-/* DEBUG inject steal       cpu_steal = cpu_sys; */
-				cpu_sum = cpu_idle + cpu_user + cpu_sys + cpu_wait + cpu_steal;
+				cpu_sum = cpu_idle + cpu_user + cpu_sys + cpu_wait;
 
 				/* Check if we had a CPU # change and have to set idle to 100 */
 				if( cpu_sum == 0)
 					cpu_sum = cpu_idle = 100.0;
 
-				RRD fprintf(fp,"rrdtool update cpu.rrd %s:%.1f:%.1f:%.1f:%.1f%.1f\n",LOOP,
+				RRD fprintf(fp,"rrdtool update cpu.rrd %s:%.1f:%.1f:%.1f:%.1f\n",LOOP,
 						(double)cpu_user / (double)cpu_sum * 100.0,
 						(double)cpu_sys  / (double)cpu_sum * 100.0,
 						(double)cpu_wait / (double)cpu_sum * 100.0,
-						(double)cpu_idle / (double)cpu_sum * 100.0,
-						(double)cpu_steal/ (double)cpu_sum * 100.0);
+						(double)cpu_idle / (double)cpu_sum * 100.0);
 				if (cpus > 1 || !cursed) {
 					if(!smp_first_time || !cursed) {
 						if(!show_raw) {
@@ -4822,8 +4383,7 @@ mvwprintw(padcpu,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthread
 							(double)cpu_user / (double)cpu_sum * 100.0,
 							(double)cpu_sys  / (double)cpu_sum * 100.0,
 							(double)cpu_wait / (double)cpu_sum * 100.0,
-							(double)cpu_idle / (double)cpu_sum * 100.0,
-							(double)cpu_steal/ (double)cpu_sum * 100.0);
+							(double)cpu_idle / (double)cpu_sum * 100.0);
 						} else {
 							save_smp(padsmp,0, 4+i,
 							  RAWTOTAL(user) - RAWTOTAL(nice),
@@ -4842,7 +4402,7 @@ mvwprintw(padcpu,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthread
 				} /* if (cpus > 1 || !cursed) */
 				smp_first_time=0;
 				DISPLAY(padsmp, i + 4);
-			}	/* if (show_smp)  */
+			}	/* if (show_smp) { */
 			if(show_verbose && cursed) {
 				cpu_user = p->cpu_total.user - q->cpu_total.user; 
 				cpu_sys  = p->cpu_total.sys  - q->cpu_total.sys; 
@@ -4884,18 +4444,15 @@ mvwprintw(padcpu,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthread
 				BANNER(padlpar,"LPAR Stats");
 				if(ret == 0) {
 				mvwprintw(padlpar,2, 0, "Reading data from /proc/ppc64/lparcfg failed");
-				mvwprintw(padlpar,3, 0, "This is probably a Native Virtual Machine");
-				} else 
-				if(power_vm_type == VM_POWERKVM_HOST || power_vm_type == VM_POWERKVM_GUEST) {
-				mvwprintw(padlpar,2, 0, "Reading data from /proc/ppc64/lparcfg mostly failed");
-				mvwprintw(padlpar,3, 0, "PowerKVM does not many of these stats");
+				mvwprintw(padlpar,3, 0, "Either run as the root user or ");
+				mvwprintw(padlpar,4, 0, "as the root user run: chmod ugo+r /proc/ppc64/lparcfg");
 				} else {
 				mvwprintw(padlpar,1, 0, "LPAR=%d  SerialNumber=%s  Type=%s",
 					lparcfg.partition_id, lparcfg.serial_number, lparcfg.system_type);
-				mvwprintw(padlpar,2, 0, "Flags:      Shared-CPU=%-5s  Capped=%-5s   SMT-mode=%d",
+				mvwprintw(padlpar,2, 0, "Flags:      Shared-CPU=%-5s  Capped=%-5s   SMT-mode=%-7s",
 					lparcfg.shared_processor_mode?"true":"false",
 					lparcfg.capped?"true":"false",
-					lparcfg.smt_mode);
+					lparcfg.smt_mode == 1 ? "off" : lparcfg.smt_mode==2 ? "SMT-2" : lparcfg.smt_mode==4 ? "SMT-4" : "unknown");
 				mvwprintw(padlpar,3, 0, "Systems CPU Pool=%8.2f          Active=%8.2f    Total=%8.2f",
 					(float)lparcfg.pool_capacity,
 					(float)lparcfg.system_active_processors,
@@ -4939,8 +4496,8 @@ mvwprintw(padcpu,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthread
 				DISPLAY(padlpar,10);
 			} else {
 				/* Only print LPAR info to spreadsheet if in shared processor mode */
-				if(ret != 0 && lparcfg.shared_processor_mode > 0 && power_vm_type == VM_POWERVM )
-				    fprintf(fp,"LPAR,%s,%9.6f,%d,%d,%d,%d,%d,%.2f,%.2f,%.2f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.2f,%d\n",
+				if(ret != 0 && lparcfg.shared_processor_mode > 0)
+				    fprintf(fp,"LPAR,%s,%9.6f,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%lld\n",
 					LOOP,
 					(double)lparcfg.purr_diff/(double)lparcfg.timebase/elapsed,
 					lparcfg.capped,
@@ -4960,8 +4517,7 @@ mvwprintw(padcpu,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthread
 					lparcfg.BoundThrds,
 					lparcfg.MinMem,
 					lparcfg.unallocated_capacity,
-					(double)lparcfg.pool_idle_diff/(double)lparcfg.timebase/elapsed,
-					lparcfg.smt_mode);
+					lparcfg.pool_idle_time);
 			}
 		}
 #endif /*POWER*/
@@ -5298,14 +4854,13 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 					(float)p->cpu_total.mins5,
 					updays, uphours, upmins);
 
-				mvwprintw(padker,4, 1, "Interrupts     %8.1f   15 mins %5.2f",
+				mvwprintw(padker,4, 1, "Interrupts     %8.1f   15 mins %5.2f    Average CPU use=%6.2f%%",
 					(float)(p->cpu_total.intr - q->cpu_total.intr)/elapsed,
-					(float)p->cpu_total.mins15);
-				average = (p->cpu_total.uptime - p->cpu_total.idletime)/ p->cpu_total.uptime *100.0;
-				if( average > 0.0) 
-					mvwprintw(padker,4, 46, "Average CPU use=%6.2f%%", average);
-				else
-					mvwprintw(padker,4, 46, "Uptime has overflowed");
+					(float)p->cpu_total.mins15,
+					(float)(
+					(p->cpu_total.uptime -
+					p->cpu_total.idletime)/
+					p->cpu_total.uptime *100.0));
 				DISPLAY(padker,5);
 			} else {
 				if(proc_first_time) {
@@ -5352,27 +4907,12 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 				}
 				BANNER(padnfs,"Network Filesystem (NFS) I/O Operations per second");
 				if(show_nfs == 1) {
-				    if(nfs_v2c_found || nfs_v2s_found) 
-					mvwprintw(padnfs,1, 0, " Version 2        Client   Server");
-				    else
-					mvwprintw(padnfs,1, 0, " Version 2 not active");
+				mvwprintw(padnfs,1, 0, " Version 2       Client   Server");
+				mvwprintw(padnfs,1, 41, "Version 3      Client   Server");
+				} else {
+				mvwprintw(padnfs,1, 0, " Version 4 Client               Client");
+				mvwprintw(padnfs,1, 42, "Version 4 Server              Server");
 
-				    if(nfs_v3c_found || nfs_v3s_found)
-					mvwprintw(padnfs,1, 41, "Version 3      Client   Server");
-				    else
-					mvwprintw(padnfs,1, 41, " Version 3 not active");
-				} 
-				if(show_nfs == 2 ) {
-				    if(nfs_v4c_found) 
-					mvwprintw(padnfs,1, 0, " Version 4 Client (%d Stats found)", nfs_v4c_names_count);
-				    else
-					mvwprintw(padnfs,1, 0, " Version 4 Client side not active");
-				} 
-				if(show_nfs == 3 ) {
-				    if(nfs_v4s_found)
-					mvwprintw(padnfs,1, 0, " Version 4 Server (%d Stats found)", nfs_v4s_names_count);
-				    else
-					mvwprintw(padnfs,1, 0, " Version 4 Server side not active");
 				}
 #define NFS_TOTAL(member) (double)(p->member)
 #define NFS_DELTA(member) (((double)(p->member - q->member)/elapsed))
@@ -5382,89 +4922,59 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 					v3s_total =0;
 					v4c_total =0;
 					v4s_total =0;
-				if(nfs_v3c_found || nfs_v3s_found) {
-					for(i=0;i<18;i++) {	/* NFS V2 Client & Server */
-						if(show_nfs == 1) 
-							mvwprintw(padnfs,2+i,  3, "%12s %8.1f %8.1f",
-							nfs_v2_names[i],
-							NFS_DELTA(nfs.v2c[i]),
-							NFS_DELTA(nfs.v2s[i]));
-						v2c_total +=NFS_DELTA(nfs.v2c[i]);
-						v2s_total +=NFS_DELTA(nfs.v2s[i]);
-					}
+				for(i=0;i<18;i++) {
+					if(show_nfs == 1) 
+						mvwprintw(padnfs,2+i,  3, "%12s %8.1f %8.1f",
+						nfs_v2_names[i],
+						NFS_DELTA(nfs.v2c[i]),
+						NFS_DELTA(nfs.v2s[i]));
+					v2c_total +=NFS_DELTA(nfs.v2c[i]);
+					v2s_total +=NFS_DELTA(nfs.v2s[i]);
 				}
-				if(nfs_v3c_found || nfs_v3s_found) {
-					for(i=0;i<22;i++) {	/* NFS V3 Client & Server */
-						if(show_nfs == 1)
-							mvwprintw(padnfs,2+i, 41, "%12s %8.1f %8.1f",
-							nfs_v3_names[i],
-							NFS_DELTA(nfs.v3c[i]),
-							NFS_DELTA(nfs.v3s[i]));
-						v3c_total +=NFS_DELTA(nfs.v3c[i]);
-						v3s_total +=NFS_DELTA(nfs.v3s[i]);
-					}
+				for(i=0;i<22;i++) {
+					if(show_nfs == 1)
+						mvwprintw(padnfs,2+i, 41, "%12s %8.1f %8.1f",
+						nfs_v3_names[i],
+						NFS_DELTA(nfs.v3c[i]),
+						NFS_DELTA(nfs.v3s[i]));
+					v3c_total +=NFS_DELTA(nfs.v3c[i]);
+					v3s_total +=NFS_DELTA(nfs.v3s[i]);
 				}
-
-				if(nfs_v4c_found) {
-					for(i=0;i<18;i++) {	/* NFS V4 Client */
-						if(show_nfs == 2) {
-							mvwprintw(padnfs,2+i, 0, "%12s%7.1f",
-							nfs_v4c_names[i],
-							NFS_DELTA(nfs.v4c[i]));
-						}
-						v4c_total +=NFS_DELTA(nfs.v4c[i]);
+				for(i=0;i<18;i++) {
+					if(show_nfs == 2) {
+						mvwprintw(padnfs,2+i, 1, "%9s%7.1f",
+						nfs_v4c_names[i],
+						NFS_DELTA(nfs.v4c[i]));
 					}
-					for(i=18;i<35;i++) {	/* NFS V4 Client */
-						if(show_nfs == 2) {
-							mvwprintw(padnfs,2+i-18, 20, "%12s%7.1f",
-							nfs_v4c_names[i],
-							NFS_DELTA(nfs.v4c[i]));
-						}
-						v4c_total +=NFS_DELTA(nfs.v4c[i]);
-					}
+					v4c_total +=NFS_DELTA(nfs.v4c[i]);
 				}
-
-				if(nfs_v4s_found) {
-					for(i=0;i<18;i++) {	/* NFS V4 Server */
-						if(show_nfs == 3) {
-							mvwprintw(padnfs,2+i, 0, "%12s%7.1f",
-							nfs_v4s_names[i],
-							NFS_DELTA(nfs.v4s[i]));
-						}
-						v4s_total +=NFS_DELTA(nfs.v4s[i]);
+				for(i=18;i<35;i++) {
+					if(show_nfs == 2) {
+						mvwprintw(padnfs,2+i-18, 19, "%12s%7.1f",
+						nfs_v4c_names[i],
+						NFS_DELTA(nfs.v4c[i]));
 					}
-					for(i=18;i<36;i++) {	/* NFS V4 Server */
-						if(show_nfs == 3) {
-							mvwprintw(padnfs,2+i-18, 19, "%12s%7.1f",
-							nfs_v4s_names[i],
-							NFS_DELTA(nfs.v4s[i]));
-						}
-						v4s_total +=NFS_DELTA(nfs.v4s[i]);
-					}
-					for(i=36;i<54 && i<nfs_v4s_names_count;i++) {	/* NFS V4 Server */
-						if(show_nfs == 3) {
-							mvwprintw(padnfs,2+i-36, 39, "%12s%7.1f",
-							nfs_v4s_names[i],
-							NFS_DELTA(nfs.v4s[i]));
-						}
-						v4s_total +=NFS_DELTA(nfs.v4s[i]);
-					}
-					for(i=54;i<=70 && i<nfs_v4s_names_count;i++) {	/* NFS V4 Server */
-						if(show_nfs == 3) {
-							mvwprintw(padnfs,2+i-54, 59, "%12s%7.1f",
-							nfs_v4s_names[i],
-							NFS_DELTA(nfs.v4s[i]));
-						}
-						v4s_total +=NFS_DELTA(nfs.v4s[i]);
-					}
+					v4c_total +=NFS_DELTA(nfs.v4c[i]);
 				}
-					mvwprintw(padnfs,2+18,  1, "--NFS-Totals->---Client----Server--");
-				/* if(nfs_v2c_found || nfs_v2s_found) */
-					mvwprintw(padnfs,2+19,  1, "NFSv2 Totals->%9.1f %9.1f", v2c_total,v2s_total);
-				/* if(nfs_v3c_found || nfs_v3s_found)*/
-					mvwprintw(padnfs,2+20,  1, "NFSv3 Totals->%9.1f %9.1f", v3c_total,v3s_total);
-				/* if(nfs_v4c_found || nfs_v4s_found)*/
-					mvwprintw(padnfs,2+21,  1, "NFSv4 Totals->%9.1f %9.1f", v4c_total,v4s_total);
+				for(i=0;i<20;i++) {
+					if(show_nfs == 2) {
+						mvwprintw(padnfs,2+i, 40, "%11s%7.1f",
+						nfs_v4s_names[i],
+						NFS_DELTA(nfs.v4s[i]));
+					}
+					v4s_total +=NFS_DELTA(nfs.v4s[i]);
+				}
+				for(i=20;i<40;i++) {
+					if(show_nfs == 2) {
+						mvwprintw(padnfs,2+i-20, 59, "%12s%7.1f",
+						nfs_v4s_names[i],
+						NFS_DELTA(nfs.v4s[i]));
+					}
+					v4s_total +=NFS_DELTA(nfs.v4s[i]);
+				}
+				mvwprintw(padnfs,2+19,  1, "NFSv2 Totals->%9.1f %9.1f", v2c_total,v2s_total);
+				mvwprintw(padnfs,2+20,  1, "NFSv3 Totals->%9.1f %9.1f", v3c_total,v3s_total);
+				mvwprintw(padnfs,2+21,  1, "NFSv4 Totals->%9.1f %9.1f", v4c_total,v4s_total);
 					
 				DISPLAY(padnfs,24);
 			} else {
@@ -5497,13 +5007,13 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 
 					if(nfs_v4c_found) {
 						fprintf(fp,"NFSCLIV4,NFS Client v4");
-						for(i=0;i<nfs_v4c_names_count;i++) 
+						for(i=0;i<35;i++) 
 							fprintf(fp,",%s",nfs_v4c_names[i]);
 						fprintf(fp,"\n");
 					}
 					if(nfs_v4s_found) {
 						fprintf(fp,"NFSSVRV4,NFS Server v4");
-						for(i=0;i<nfs_v4s_names_count;i++) 
+						for(i=0;i<40;i++) 
 							fprintf(fp,",%s",nfs_v4s_names[i]);
 						fprintf(fp,"\n");
 					}
@@ -5545,7 +5055,7 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 
 				if(nfs_v4c_found) {
 					fprintf(fp,show_rrd ? "rrdtool update nfscliv4.rrd %s" : "NFSCLIV4,%s", LOOP);
-					for(i=0;i<nfs_v4c_names_count;i++) {
+					for(i=0;i<35;i++) {
 						fprintf(fp,show_rrd ? ":%.1f" : ",%.1f", 
 						(double)NFS_DELTA(nfs.v4c[i]));
 					}
@@ -5553,7 +5063,7 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 				}
 				if(nfs_v4s_found) {
 					fprintf(fp,show_rrd ? "rrdtool update nfsvrv4.rrd %s" : "NFSSVRV4,%s", LOOP);
-					for(i=0;i<nfs_v4c_names_count;i++) {
+					for(i=0;i<40;i++) {
 						fprintf(fp,show_rrd ? ":%.1f" : ",%.1f", 
 						(double)NFS_DELTA(nfs.v4s[i]));
 					}
@@ -5591,20 +5101,20 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 			}
 			DISPLAY(padnet,networks + 2);
 			if (!cursed) {
-				fprintf(fp,show_rrd ? "rrdtool update net.rrd %s" : "NET,%s", LOOP);
+				fprintf(fp,show_rrd ? "rrdtool update net.rrd %s" : "NET,%s,", LOOP);
 				for (i = 0; i < networks; i++) {
-					fprintf(fp,show_rrd ? ":%.1f" : ",%.1f", IFDELTA(if_ibytes) / 1024.0);
+					fprintf(fp,show_rrd ? ":%.1f" : "%.1f,", IFDELTA(if_ibytes) / 1024.0);
 				}
 				for (i = 0; i < networks; i++) {
-					fprintf(fp,show_rrd ? ":%.1f" : ",%.1f", IFDELTA(if_obytes) / 1024.0);
+					fprintf(fp,show_rrd ? ":%.1f" : "%.1f,", IFDELTA(if_obytes) / 1024.0);
 				}
 				fprintf(fp,"\n");
-				fprintf(fp,show_rrd ? "rrdtool update netpacket.rrd %s" : "NETPACKET,%s", LOOP);
+				fprintf(fp,show_rrd ? "rrdtool update netpacket.rrd %s" : "NETPACKET,%s,", LOOP);
 				for (i = 0; i < networks; i++) {
-					fprintf(fp,show_rrd ? ":%.1f" : ",%.1f", IFDELTA(if_ipackets) );
+					fprintf(fp,show_rrd ? ":%.1f" : "%.1f,", IFDELTA(if_ipackets) );
 				}
 				for (i = 0; i < networks; i++) {
-					fprintf(fp,show_rrd ? ":%.1f" : ",%.1f", IFDELTA(if_opackets) );
+					fprintf(fp,show_rrd ? ":%.1f" : "%.1f,", IFDELTA(if_opackets) );
 				}
 				fprintf(fp,"\n");
 			}
@@ -5675,10 +5185,10 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 						fs_bsize = 4.0 * 1024.0;
 					else
 						fs_bsize = statfs_buffer.f_bsize;
-					/* convert blocks to MB */
+					/* convery blocks to MB */
 					fs_size = (float)statfs_buffer.f_blocks * fs_bsize/1024.0/1024.0;
 
-					/* find the best size info available f_bavail is like df reports
+					/* fine the best size info available f_bavail is like df reports
 					   otherwise use f_bsize (this includes inode blocks) */
 					if(statfs_buffer.f_bavail == 0) 
 						fs_free = (float)statfs_buffer.f_bfree  * fs_bsize/1024.0/1024.0;
@@ -5688,7 +5198,7 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 					/* this is a percentage */
 					fs_size_used = (fs_size - (float)statfs_buffer.f_bfree  * fs_bsize/1024.0/1024.0)/fs_size * 100.0;
 					/* try to get the same number as df using kludge */
-					/*fs_size_used += 1.0; */
+					fs_size_used += 1.0;
 					if (fs_size_used >100.0)
 						fs_size_used = 100.0;
 
@@ -5697,14 +5207,14 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 					else {
 						str_p=&jfs[k].device[i-20];
 					}
-					mvwprintw(padjfs,2+k, 0, "%-20s %7.0f %7.0f %4.0f%% %-8s %s",
-						str_p,
-						fs_size,
-						fs_free,
-						ceil(fs_size_used),
-						jfs[k].type,
-						jfs[k].name
-						);
+				    mvwprintw(padjfs,2+k, 0, "%-20s %7.0f %7.0f %4.0f%% %-8s %s",
+					str_p,
+					fs_size,
+					fs_free,
+					fs_size_used,
+					jfs[k].type,
+					jfs[k].name
+					);
 
 					} else {
 					mvwprintw(padjfs,2+k, 0, "%s", jfs[k].name);
@@ -5728,37 +5238,14 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 			for (k = 0; k < jfses; k++) {
 			    if(jfs[k].mounted && strncmp(jfs[k].name,"/proc",5)
 						&& strncmp(jfs[k].name,"/sys",4)
-						&& strncmp(jfs[k].name,"/dev/",5)
-						&& strncmp(jfs[k].name,"/run/",5)
+						&& strncmp(jfs[k].name,"/dev/pts",8)
+						&& strncmp(jfs[k].name,"/dev/shm",8)
 						&& strncmp(jfs[k].name,"/var/lib/nfs/rpc",16)
 				)   { /* /proc gives invalid/insane values */
 					    if(fstatfs( jfs[k].fd, &statfs_buffer) != -1) {
-						if(statfs_buffer.f_bsize == 0) 
-							fs_bsize = 4.0 * 1024.0;
-						else
-							fs_bsize = statfs_buffer.f_bsize;
-						/* convert blocks to MB */
-						fs_size = (float)statfs_buffer.f_blocks * fs_bsize/1024.0/1024.0;
-
-						/* find the best size info available f_bavail is like df reports
-						   otherwise use f_bsize (this includes inode blocks) */
-						if(statfs_buffer.f_bavail == 0) 
-							fs_free = (float)statfs_buffer.f_bfree  * fs_bsize/1024.0/1024.0;
-						else
-							fs_free = (float)statfs_buffer.f_bavail  * fs_bsize/1024.0/1024.0;
-
-
-
-						if(fs_size <= 0.0 || fs_bsize <= 0.0) /* some pseudo filesystems have zero size but we get a -nan result */
-						fs_size_used = 0.0;
-						else
-						fs_size_used = (fs_size - (float)statfs_buffer.f_bfree  * fs_bsize/1024.0/1024.0)/fs_size * 100.0;
-
-						if (fs_size_used >100.0)
-							fs_size_used = 100.0;
-
-						fprintf(fp, show_rrd ? ":%.1f" : ",%.1f", fs_size_used );
-					    }
+					fprintf(fp, show_rrd ? ":%.1f" : ",%.1f",
+					((float)statfs_buffer.f_blocks - (float)statfs_buffer.f_bfree)/(float)statfs_buffer.f_blocks*100.0);
+				    }
 				    else
 					fprintf(fp, show_rrd? ":U" : ",0.0");
 				}
@@ -5872,9 +5359,6 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 					}
 				}
 				for (i = 0,k=0; i < disks; i++) {
-					if(disk_only_mode && is_dgroup_name(p->dk[i].dk_name) == 0)
-						continue;
-
 /*
 					if(p->dk[i].dk_name[0] == 'h')
 						continue;
@@ -6048,7 +5532,7 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 					disk_first_time=0;
 					mvwprintw(paddg, 1, 1, "Please wait - collecting disk data");
 				} else {
-					mvwprintw(paddg, 1, 1, "Name          Disks AvgBusy Read-KB/s|Write  TotalMB/s   xfers/s BlockSizeKB");
+					mvwprintw(paddg, 1, 1, "Name          Disks AvgBusy Read|Write-KB/s  TotalMB/s   xfers/s BlockSizeKB");
 					total_busy   = 0.0;
 					total_rbytes = 0.0;
 					total_wbytes = 0.0;
@@ -6314,41 +5798,43 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 							}
 						}
 						fprintf(fp, "\n");
-						fprintf(fp,"DGBACKLOG,%s", LOOP);
+#ifdef EXPERIMENTAL
+						fprintf(fp,"DGF11,%s", LOOP);
 						for (k = 0; k < dgroup_total_groups; k++) {
 							if (dgroup_name[k] != 0) {
 								disk_total = 0.0;
 								for (j = 0; j < dgroup_disks[k]; j++) {
 									i = dgroup_data[k*DGROUPITEMS+j];
 									if (i != -1) {
-										disk_total  += DKDELTA(dk_backlog);
+										disk_total  += DKDELTA(dk_11);
 									}
 								}
 								fprintf(fp,",%.1f", disk_total);
 							}
 						}
 						fprintf(fp, "\n");
+#endif /*EXPERIMENTAL*/
 					} /* if( extended_disk == 1 && disk_mode == DISK_MODE_DISKSTATS */
 				}	/* if (dgroup_loaded == 2) */
 			}	/* else from if(cursed) */
-		}	/* 		if ((show_dgroup || (!cursed && dgroup_loaded)))  */
+		}	/* 		if ((show_dgroup || (!cursed && dgroup_loaded))) { */
 
 		if (show_top) {
-			wmove(padtop,1, 1);
-			wclrtobot(padtop);
 			/* Get the details of the running processes */
+			firstproc = 0;
 			skipped = 0;
 			n = getprocs(0);
 			if (n > p->nprocs) {
 				n = n +128; /* allow for growth in the number of processes in the mean time */
-				p->procs = REALLOC(p->procs, sizeof(struct procsinfo ) * (n+1) ); /* add one to avoid overrun */
+				p->procs = realloc(p->procs, sizeof(struct procsinfo ) * (n+1) ); /* add one to avoid overrun */
 				p->nprocs = n;
 			}
 
+			firstproc = 0;
                         n = getprocs(1);
 
 			if (topper_size < n) {
-				topper = REALLOC(topper, sizeof(struct topper ) * (n+1) ); /* add one to avoid overrun */
+				topper = realloc(topper, sizeof(struct topper ) * (n+1) ); /* add one to avoid overrun */
 				topper_size = n;
 			}
 			/* Sort the processes by CPU utilisation */
@@ -6361,8 +5847,6 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 					topper[max_sorted].time =  TIMEDELTA(pi_utime,i,j) + 
 								   TIMEDELTA(pi_stime,i,j);
 					topper[max_sorted].size =  p->procs[i].statm_resident;
-					if(isroot)
-					    topper[max_sorted].io =  COUNTDELTA(read_io) + COUNTDELTA(write_io);
 
 					max_sorted++;
 					break;
@@ -6375,15 +5859,13 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 				break;
 			case 4: qsort((void *) & topper[0], max_sorted, sizeof(struct topper ), &size_compare );
 				break;
+#ifdef DISK
 			case 5: qsort((void *) & topper[0], max_sorted, sizeof(struct topper ), &disk_compare );
 				break;
+#endif /* DISK */
 			}
 			CURSE BANNER(padtop,"Top Processes");
-			if(isroot) {
 			CURSE mvwprintw(padtop,0, 15, "Procs=%d mode=%d (1=Basic, 3=Perf 4=Size 5=I/O)", n, show_topmode);
-			} else {
-			CURSE mvwprintw(padtop,0, 15, "Procs=%d mode=%d (1=Basic, 3=Perf 4=Size 5=(root-only))", n, show_topmode);
-			}
 			if(cursed && top_first_time) {
 				top_first_time = 0;
 				mvwprintw(padtop,1, 1, "Please wait - information being collected");
@@ -6421,34 +5903,21 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 			case 4:
 			case 5:
 
-				if(show_args == ARGS_ONLY)  {
+				if(show_args == ARGS_ONLY) 
 					formatstring = "  PID    %%CPU ResSize    Command                                            ";
-				} else if(COLS > 119) {
-					if(show_topmode == 5)
-					formatstring = "  PID       %%CPU    Size     Res    Res     Res     Res    Shared   StorageKB Command";
-					else
-					formatstring = "  PID       %%CPU    Size     Res    Res     Res     Res    Shared    Faults   Command";
-				} else {
-					if(show_topmode == 5)
-					formatstring = "  PID    %%CPU  Size   Res   Res   Res   Res Shared StorageKB Command";
-					else
-					formatstring = "  PID    %%CPU  Size   Res   Res   Res   Res Shared   Faults  Command";
-				}
+
+				else if(COLS > 119)
+					formatstring = "  PID       %%CPU    Size     Res    Res     Res     Res    Shared    Faults  Command";
+				else
+					formatstring = "  PID    %%CPU  Size   Res   Res   Res   Res Shared   Faults Command";
 				CURSE mvwprintw(padtop,1, y, formatstring);
 
-				if(show_args == ARGS_ONLY) {
+				if(show_args == ARGS_ONLY)
 					formatstring = "         Used      KB                                                        ";
-				} else if(COLS > 119) {
-					if(show_topmode == 5)
-					formatstring = "            Used      KB     Set    Text    Data     Lib    KB    Read Write";
-					else
+				else if(COLS > 119)
 					formatstring = "            Used      KB     Set    Text    Data     Lib    KB     Min   Maj";
-				} else {
-					if(show_topmode == 5)
-					formatstring = "         Used    KB   Set  Text  Data   Lib    KB ReadWrite ";
-					else
+				else
 					formatstring = "         Used    KB   Set  Text  Data   Lib    KB  Min  Maj ";
-				}
 				CURSE mvwprintw(padtop,2, 1, formatstring);
 				for (j = 0; j < max_sorted; j++) {
 					i = topper[j].index;
@@ -6460,7 +5929,7 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 							break;
 					}
 					if(cursed) {
-					    if( x + j + 3 - skipped > LINES+2) /* +2 to for safety :-) XYZXYZ*/
+					    if( x + j + 3 - skipped > LINES+2) /* +2 to for safety :-) */
 						break;
 					    if(cmdfound && !cmdcheck(p->procs[i].pi_comm)) {
 						skipped++;
@@ -6480,7 +5949,6 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 					    formatstring = "%8d %7.1f %7lu %7lu %7lu %7lu %7lu %5lu %6d %6d %-32s";
 					else
 					    formatstring = "%7d %5.1f %5lu %5lu %5lu %5lu %5lu %5lu %4d %4d %-32s";
-
 					    mvwprintw(padtop,j + 3 - skipped, 1, formatstring,
 					    p->procs[i].pi_pid,
 					    topper[j].time/elapsed,
@@ -6491,8 +5959,8 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 					    p->procs[i].statm_drs*pagesize/1024UL, /* in KB */
 					    p->procs[i].statm_lrs*pagesize/1024UL, /* in KB */
 					    p->procs[i].statm_share*pagesize/1024UL, /* in KB */
-					    show_topmode == 5 ? (int)(COUNTDELTA(read_io)  / elapsed / 1024) : (int)(COUNTDELTA(pi_minflt) / elapsed),
-					    show_topmode == 5 ? (int)(COUNTDELTA(write_io) / elapsed / 1024) : (int)(COUNTDELTA(pi_majflt) / elapsed),
+					    (int)(COUNTDELTA(pi_minflt) / elapsed),
+					    (int)(COUNTDELTA(pi_majflt) / elapsed),
 					    p->procs[i].pi_comm);
 					  }
 					}
@@ -6538,7 +6006,7 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 				break;
 			    }
 			}
-			DISPLAY(padtop,3 + j);
+			CURSE DISPLAY(padtop,j + 3);
 		}
 
 		if(cursed) {
@@ -6548,9 +6016,7 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 				DISPLAY(padverb,4);
 				x=y;
 			}
-			/* underline the end of the stats area border */
-			if(x < LINES-2)mvwhline(stdscr, x, 1, ACS_HLINE,COLS-2);
-
+			if(x<LINES-2)mvwhline(stdscr, x, 1, ACS_HLINE,COLS-2);
 			wmove(stdscr,0, 0);
 			wrefresh(stdscr);
 			doupdate();
@@ -6560,50 +6026,20 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 				if (checkinput())
 					break;
 			}
-			if(x<LINES-2) mvwhline(stdscr, x, 1, ' ', COLS-2);
-			if(first_key_pressed == 0){
-				first_key_pressed=1;
-				wmove(stdscr,0, 0);
-				wclear(stdscr);
-				wmove(stdscr,0,0);
-				wclrtobot(stdscr);
-				wrefresh(stdscr);
-				doupdate();
-			}
-
 		}
 		else {
 			fflush(NULL);
-
-			gettimeofday(&nmon_tv, 0);
-			nmon_end_time = (double)nmon_tv.tv_sec + (double)nmon_tv.tv_usec * 1.0e-6;
-			if(nmon_run_time  < 0.0){
-				nmon_start_time = nmon_end_time;
-				nmon_run_time = 0.0;
-			}
-			nmon_run_time += (nmon_end_time - nmon_start_time);
-			if(nmon_run_time < 1.0) {
-				secs = seconds;  /* sleep for the requested number of seconds */
-			}
-			else {
-				seconds_over = (int)nmon_run_time; /* reduce the sleep time by whole number of seconds */
-				secs = seconds - seconds_over;
-				nmon_run_time -= (double)seconds_over;
-			}
-			if(secs < 1) /* sanity check in case CPUs are flat out and nmon taking far to long to complete */
-				secs = 1;
-
+			secs = seconds; 
 redo:
 			errno = 0;
 			ret = sleep(secs); 
 			if( (ret != 0 || errno != 0) && loop != maxloops ) {
-				fprintf(fp,"ERROR,%s, sleep interrupted, sleep(%d seconds), return value=%d",LOOP, secs, ret);
-				fprintf(fp,", errno=%d\n",errno);
+				fprintf(fp,"ERROR,%s,sleep got interrupted:",LOOP);
+				fprintf(fp,"ret was %d, ",ret);
+				fprintf(fp,"errno was %d\n",errno);
 				secs=ret;
 				goto redo;
 			}
-			gettimeofday(&nmon_tv, 0);
-			nmon_start_time = (double)nmon_tv.tv_sec + (double)nmon_tv.tv_usec * 1.0e-6;
 		}
 
 		switcher();
