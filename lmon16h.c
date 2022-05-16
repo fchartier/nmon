@@ -20,13 +20,13 @@
 
 /*
  * Use the following Makefile (for Linux on POWER)
-CFLAGS=-g -D JFS -D GETUSER -Wall -D LARGEMEM -D POWER -D KERNEL_2_6_18lmon15ibeta10.c 
+CFLAGS=-g -D JFS -D GETUSER -Wall -D LARGEMEM -D POWER -D KERNEL_2_6_18 
 LDFLAGS=-lcurses -lm
 nmon: lmon.o
  * end of Makefile
  */
 /* Other #ifdef's for specific features or platforms
-Platforms: POWER MAINFRAME X86 - only one of these at a time
+Platforms: POWER MAINFRAME X86 ARM - Mandatory one of these at a time
 Specific Linux versions: RHEL7 SLES113 SLES12
 Specific feature: NVIDIA_GPU
 Bug / missing feature workarounds:
@@ -48,7 +48,7 @@ KERNEL_2_6_18 1 kernel level and above adds the following to the disk stats
 #define RAW(member)      (long)((long)(p->cpuN[i].member)   - (long)(q->cpuN[i].member))
 #define RAWTOTAL(member) (long)((long)(p->cpu_total.member) - (long)(q->cpu_total.member))
 
-#define VERSION "16g"
+#define VERSION "16h"
 char version[] = VERSION;
 static char *SccsId = "nmon " VERSION;
 
@@ -298,9 +298,9 @@ struct {
 void lscpu_init()
 {
     FILE *pop;
-    int i;
-#define LSCPU_STRLEN 256
-#define NUMBER_COL 23
+    int len;
+    int data_col = 21;
+#define LSCPU_STRLEN 512
     char tmpstr[LSCPU_STRLEN + 1];
 
     if (lscpu_available == 1)
@@ -309,18 +309,26 @@ void lscpu_init()
     if (pop != NULL) {
 	lscpu_available = 1;
 	tmpstr[0] = 0;
-	for (i = 0;; i++) {
-	    if (fgets(tmpstr, LSCPU_STRLEN, pop) == NULL)
-		break;
+	while (fgets(tmpstr, LSCPU_STRLEN, pop) != NULL) {
 	    tmpstr[strlen(tmpstr) - 1] = 0;	/* remove newline */
-	    if (strncmp("Architecture:", tmpstr, strlen("Architecture:"))
-		== 0) {
-		lscpu.arch = malloc(strlen(&tmpstr[NUMBER_COL]) + 1);
-		strcpy(lscpu.arch, &tmpstr[NUMBER_COL]);
+	    if (strncmp("Architecture:", tmpstr, strlen("Architecture:")) == 0) {
+
+		/* Architecture:        SOMETHING OR OTHER
+		   0123456789012345678901 
+		                 |->    ^                     */
+		/* start from char after the :<space> looking for some leters or numbers */
+		len = strlen(tmpstr);
+		for(data_col=14;data_col<len;data_col++) {
+		   if(isalnum(tmpstr[data_col]))
+	 		break;
+		}
+
+		lscpu.arch = MALLOC(strlen(&tmpstr[data_col]) + 1);
+		strcpy(lscpu.arch, &tmpstr[data_col]);
 	    }
 	    if (strncmp("Byte Order:", tmpstr, strlen("Byte Order:")) == 0) {
-		lscpu.byte_order = malloc(strlen(&tmpstr[NUMBER_COL]) + 1);
-		strcpy(lscpu.byte_order, &tmpstr[NUMBER_COL]);
+		lscpu.byte_order = MALLOC(strlen(&tmpstr[data_col]) + 1);
+		strcpy(lscpu.byte_order, &tmpstr[data_col]);
 		if (strncmp
 		    ("Little Endian", lscpu.byte_order,
 		     strlen("Little Endian")) == 0) {
@@ -333,56 +341,56 @@ void lscpu_init()
 		}
 	    }
 	    if (strncmp("CPU(s):", tmpstr, strlen("CPU(s):")) == 0) {
-		sscanf(&tmpstr[NUMBER_COL], "%d", &lscpu.cpus);
+		sscanf(&tmpstr[data_col], "%d", &lscpu.cpus);
 	    }
 	    if (strncmp
 		("On-line CPU(s) list:", tmpstr,
 		 strlen("On-line CPU(s) list:")) == 0) {
-		lscpu.cpu_online = malloc(strlen(&tmpstr[NUMBER_COL]) + 1);
-		strcpy(lscpu.cpu_online, &tmpstr[NUMBER_COL]);
+		lscpu.cpu_online = MALLOC(strlen(&tmpstr[data_col]) + 1);
+		strcpy(lscpu.cpu_online, &tmpstr[data_col]);
 	    }
 	    if (strncmp
 		("Off-line CPU(s) list:", tmpstr,
 		 strlen("Off-line CPU(s) list:")) == 0) {
 		lscpu.cpu_offline =
-		    malloc(strlen(&tmpstr[NUMBER_COL]) + 1);
-		strcpy(lscpu.cpu_offline, &tmpstr[NUMBER_COL]);
+		    MALLOC(strlen(&tmpstr[data_col]) + 1);
+		strcpy(lscpu.cpu_offline, &tmpstr[data_col]);
 	    }
 	    if (strncmp("Model:", tmpstr, strlen("Model:")) == 0) {
-		lscpu.model = malloc(strlen(&tmpstr[NUMBER_COL]) + 1);
-		strcpy(lscpu.model, &tmpstr[NUMBER_COL]);
+		lscpu.model = MALLOC(strlen(&tmpstr[data_col]) + 1);
+		strcpy(lscpu.model, &tmpstr[data_col]);
 	    }
 	    if (strncmp("Model name:", tmpstr, strlen("Model name:")) == 0) {
-		lscpu.model_name = malloc(strlen(&tmpstr[NUMBER_COL]) + 1);
-		strcpy(lscpu.model_name, &tmpstr[NUMBER_COL]);
+		lscpu.model_name = MALLOC(strlen(&tmpstr[data_col]) + 1);
+		strcpy(lscpu.model_name, &tmpstr[data_col]);
 	    }
 	    if (strncmp
 		("Thread(s) per core:", tmpstr,
 		 strlen("Thread(s) per core:")) == 0) {
-		sscanf(&tmpstr[NUMBER_COL], "%d", &lscpu.threads);
+		sscanf(&tmpstr[data_col], "%d", &lscpu.threads);
 	    }
 	    if (strncmp
 		("Core(s) per socket:", tmpstr,
 		 strlen("Core(s) per socket:")) == 0) {
-		sscanf(&tmpstr[NUMBER_COL], "%d", &lscpu.cores);
+		sscanf(&tmpstr[data_col], "%d", &lscpu.cores);
 	    }
 	    if (strncmp("Socket(s):", tmpstr, strlen("Socket(s):")) == 0) {
-		sscanf(&tmpstr[NUMBER_COL], "%d", &lscpu.sockets);
+		sscanf(&tmpstr[data_col], "%d", &lscpu.sockets);
 	    }
 	    if (strncmp("NUMA node(s):", tmpstr, strlen("NUMA node(s):"))
 		== 0) {
-		sscanf(&tmpstr[NUMBER_COL], "%d", &lscpu.numa_nodes);
+		sscanf(&tmpstr[data_col], "%d", &lscpu.numa_nodes);
 	    }
 	    if (strncmp("CPU MHz:", tmpstr, strlen("CPU MHz:")) == 0) {
-		sscanf(&tmpstr[NUMBER_COL], "%d", &lscpu.mhz);
+		sscanf(&tmpstr[data_col], "%d", &lscpu.mhz);
 	    }
 	    if (strncmp("CPU max MHz:", tmpstr, strlen("CPU max MHz:")) ==
 		0) {
-		sscanf(&tmpstr[NUMBER_COL], "%d", &lscpu.mhz_max);
+		sscanf(&tmpstr[data_col], "%d", &lscpu.mhz_max);
 	    }
 	    if (strncmp("CPU min MHz:", tmpstr, strlen("CPU min MHz:")) ==
 		0) {
-		sscanf(&tmpstr[NUMBER_COL], "%d", &lscpu.mhz_min);
+		sscanf(&tmpstr[data_col], "%d", &lscpu.mhz_min);
 	    }
 	}
 	pclose(pop);
@@ -435,7 +443,7 @@ void proc_read(int num)
 
     if (proc[num].fp == 0) {
 	if ((proc[num].fp = fopen(proc[num].filename, "r")) == NULL) {
-	    sprintf(buf, "failed to open file %s", proc[num].filename);
+	    snprintf(buf, 1024,"failed to open file %s", proc[num].filename);
 	    error(buf);
 	    proc[num].fp = 0;
 	    return;
@@ -686,9 +694,9 @@ char *timestamp(int loop, time_t eon)
 {
     static char string[64];
     if (show_rrd)
-	sprintf(string, "%ld", (long) eon);
+	snprintf(string, 64, "%ld", (long) eon);
     else
-	sprintf(string, "T%04d", loop);
+	snprintf(string, 64, "T%04d", loop);
     return string;
 }
 
@@ -761,7 +769,7 @@ void args_output(int pid, int loop, char *progname)
 	if (arglist[i].pid == 0)	/* got to empty slot */
 	    break;
     }
-    sprintf(tmpstr, "ps -p %d -o args 2>/dev/null", pid);
+    snprintf(tmpstr, CMDLEN, "ps -p %d -o args 2>/dev/null", pid);
     pop = popen(tmpstr, "r");
     if (pop == NULL) {
 	return;
@@ -1657,14 +1665,15 @@ void get_intel_spec()
     }
     for (i = 0; i < proc[P_CPUINFO].lines; i++) {
 	if((strncmp("bogomips", proc[P_CPUINFO].line[i], 8) == 0) ||
-	   (strncmp("bogoMIPS", proc[P_CPUINFO].line[i], 8) == 0)){
+	   (strncmp("bogoMIPS", proc[P_CPUINFO].line[i], 8) == 0) ||
+	   (strncmp("BogoMIPS", proc[P_CPUINFO].line[i], 8) == 0)){
 	    bogo_ptr = &proc[P_CPUINFO].line[i][11];
 	}
     }
 
     for (i = 0; i < proc[P_CPUINFO].lines; i++) {
 	if (strncmp("physical id", proc[P_CPUINFO].line[i], 11) == 0) {
-	    id = atoi(&proc[P_CPUINFO].line[i][15]);
+	    id = atoi(&proc[P_CPUINFO].line[i][14]);
 	    if (id < 256)
 		physicalcpu[id] = 1;
 	}
@@ -2076,7 +2085,7 @@ void proc_disk_io(double elapsed)
 	    p->dk[i].dk_time += 100 * elapsed;
 	p->dk[i].dk_time = fudged_busy;
 
-	sprintf(p->dk[i].dk_name, "dev-%d-%d", p->dk[i].dk_major,
+	snprintf(p->dk[i].dk_name, 32, "dev-%d-%d", p->dk[i].dk_major,
 		p->dk[i].dk_minor);
 /*	fprintf(stderr,"disk=%d name=\"%s\" major=%d minor=%d\n", i,p->dk[i].dk_name, p->dk[i].dk_major,p->dk[i].dk_minor); */
 	str++;
@@ -2728,7 +2737,7 @@ char *get_state(char n)
     case 'W':
 	return "Paging   ";
     default:
-	sprintf(duff, "%d", n);
+	snprintf(duff, 64, "%d", n);
 	return duff;
     }
 }
@@ -2770,7 +2779,7 @@ char *getuser(uid_t uid)
     if (pw != NULL)
 	strncpy(u[i].name, pw->pw_name, NAMESIZE);
     else
-	sprintf(u[i].name, "unknown%d", uid);
+	snprintf(u[i].name, NAMESIZE, "unknown%d", uid);
     return u[i].name;
 }
 #endif				/* GETUSER */
@@ -3416,12 +3425,17 @@ int checkinput(void)
 	    use_env = 0;
 	    p = getenv("NMON");
 	    if (p != 0) {
-		strcpy(buf, p);
+		strncpy(buf, p, 1024);
 		chars = strlen(buf);
 	    } else
 		chars = 0;
-	} else
+	} else {
+	    if(bytes > 1024) { /* block over flowing the buffer */
+		bytes = 1023;
+		buf[1023]=0;
+	    }
 	    chars = read(fileno(stdin), buf, bytes);
+	}
 	if (chars > 0) {
 	    welcome = 0;
 	    for (i = 0; i < chars; i++) {
@@ -3775,9 +3789,9 @@ int proc_procsinfo(int pid, int index)
     int count = 0;
     int i;
 
-    sprintf(filename, "/proc/%d/stat", pid);
+    snprintf(filename, 64, "/proc/%d/stat", pid);
     if ((fp = fopen(filename, "r")) == NULL) {
-	sprintf(buf, "failed to open file %s", filename);
+	snprintf(buf, 1024 * 4, "failed to open file %s", filename);
 	error(buf);
 	return 0;
     }
@@ -3880,9 +3894,9 @@ int proc_procsinfo(int pid, int index)
 	return 0;
     }
 
-    sprintf(filename, "/proc/%d/statm", pid);
+    snprintf(filename, 64, "/proc/%d/statm", pid);
     if ((fp = fopen(filename, "r")) == NULL) {
-	sprintf(buf, "failed to open file %s", filename);
+	snprintf(buf, 1024 * 4, "failed to open file %s", filename);
 	error(buf);
 	return 0;
     }
@@ -3890,7 +3904,7 @@ int proc_procsinfo(int pid, int index)
     fclose(fp);			/* close it even if the read failed, the file could have been removed 
 				   between open & read i.e. the device driver does not behave like a file */
     if (size == -1) {
-	sprintf(buf, "failed to read file %s", filename);
+	snprintf(buf, 1024 * 4, "failed to read file %s", filename);
 	error(buf);
 	return 0;
     }
@@ -3910,7 +3924,7 @@ int proc_procsinfo(int pid, int index)
     if (isroot) {
 	p->procs[index].read_io = 0;
 	p->procs[index].write_io = 0;
-	sprintf(filename, "/proc/%d/io", pid);
+	snprintf(filename, 64, "/proc/%d/io", pid);
 	if ((fp = fopen(filename, "r")) != NULL) {
 	    for (i = 0; i < 6; i++) {
 		if (fgets(buf, 1024, fp) == NULL) {
@@ -4064,7 +4078,7 @@ void child_start(int when,
 {
     int i;
     pid_t child_pid;
-    char time_stamp_str[20] = "";
+    char time_stamp_str[64] = "";
     char *when_info = "";
     struct tm *tim;		/* used to work out the hour/min/second */
 
@@ -4106,11 +4120,11 @@ void child_start(int when,
 	/* create requested timestamp */
 	if (timestamp_type == 1) {
 	    tim = localtime(&the_time);
-	    sprintf(time_stamp_str, "%02d:%02d:%02d,%02d,%02d,%04d",
+	    snprintf(time_stamp_str, 64, "%02d:%02d:%02d,%02d,%02d,%04d",
 		    tim->tm_hour, tim->tm_min, tim->tm_sec,
 		    tim->tm_mday, tim->tm_mon + 1, tim->tm_year + 1900);
 	} else {
-	    sprintf(time_stamp_str, "T%04d", loop);
+	    snprintf(time_stamp_str, 64, "T%04d", loop);
 	}
 
 	/* close all open file pointers except the defaults */
@@ -4161,6 +4175,7 @@ int main(int argc, char **argv)
     double cpu_busy;
 #ifdef POWER
     int lpar_first_time = 1;
+    long max_speed = 0;
 #endif				/* POWER */
     int smp_first_time = 1;
     int wide_first_time = 1;
@@ -4193,11 +4208,11 @@ int main(int argc, char **argv)
     double writers;
 
     /* for popen on oslevel */
-    char str[512];
     char *str_p;
     int varperftmp = 0;
     char *formatstring;
-    char user_filename[512];
+    char *open_filename = 0;
+    char *user_filename = 0;
     char user_filename_set = 0;
     char using_stdout = 0;
     struct statfs statfs_buffer;
@@ -4328,19 +4343,19 @@ int main(int argc, char **argv)
     reread = 1;
 #endif
     for (i = 0; i < CMDMAX; i++) {
-	sprintf(cmdstr, "NMONCMD%d", i);
+	snprintf(cmdstr, 256, "NMONCMD%d", i);
 	cmdlist[i] = getenv(cmdstr);
 	if (cmdlist[i] != 0)
 	    cmdfound = i + 1;
     }
     /* Setup long and short Hostname */
     gethostname(hostname, sizeof(hostname));
-    strcpy(fullhostname, hostname);
+    strncpy(fullhostname, hostname, 256);
     for (i = 0; i < sizeof(hostname); i++)
 	if (hostname[i] == '.')
 	    hostname[i] = 0;
     if (run_name_set == 0)
-	strcpy(run_name, hostname);
+	strncpy(run_name, hostname, 256);
 
     if (getuid() == 0)
 	isroot = 1;
@@ -4403,6 +4418,7 @@ int main(int argc, char **argv)
 	    extended_disk = 1;
 	    break;
 	case 'F':		/* background mode with user supplied filename */
+	    user_filename = MALLOC(strlen(optarg));
 	    strcpy(user_filename, optarg);
 	    user_filename_set++;
 	    go_background(288, 300);
@@ -4472,7 +4488,7 @@ int main(int argc, char **argv)
 	    show_headings = 0;
 	    break;
 	case 'r':
-	    strcpy(run_name, optarg);
+	    strncpy(run_name, optarg, 255);
 	    run_name_set++;
 	    break;
 	case 's':
@@ -4660,29 +4676,36 @@ int main(int argc, char **argv)
 	tim = localtime(&timer);
 	tim->tm_year += 1900 - 2000;	/* read localtime() manual page!! */
 	tim->tm_mon += 1;	/* because it is 0 to 11 */
-	if (varperftmp)
-	    sprintf(str, "/var/perf/tmp/%s_%02d.nmon", hostname,
+	if (varperftmp) {
+	    open_filename = MALLOC(1024*4);
+	    snprintf(open_filename, 1024 * 4, "/var/perf/tmp/%s_%02d.nmon", hostname,
 		    tim->tm_mday);
-	else if (user_filename_set)
-	    strcpy(str, user_filename);
-	else
-	    sprintf(str, "%s_%02d%02d%02d_%02d%02d.nmon",
+	}
+	else if (user_filename_set && user_filename != 0) {
+	    open_filename = MALLOC(strlen(user_filename)+1);
+	    strncpy(open_filename, user_filename, strlen(user_filename));
+	}
+	else {
+	    open_filename = MALLOC(1024*4);
+	    snprintf(open_filename, 1024 * 4, "%s_%02d%02d%02d_%02d%02d.nmon",
 		    hostname,
 		    tim->tm_year,
 		    tim->tm_mon, tim->tm_mday, tim->tm_hour, tim->tm_min);
-	if (!strncmp(str, "stdout", 6)) {
+	}
+	if (!strncmp(open_filename, "stdout", 6)) {
 		using_stdout = 1;
 		if ((fp = fdopen(1, "w")) == 0) {
 		    perror("nmon: failed to open standard output");
 		    exit(41);
 		}
 	} else {
-		if ((fp = fopen(str, "w")) == 0) {
+		if ((fp = fopen(open_filename, "w")) == 0) {
 		    perror("nmon: failed to open output file");
-		    printf("nmon: output filename=%s\n", str);
+		    printf("nmon: output filename=%s\n", open_filename);
 		    exit(42);
 		}
 	}
+	free(open_filename);
 	/* disconnect from terminal */
 	fflush(NULL);
 	if (!debug && (childpid = fork()) != 0) {
@@ -5063,30 +5086,13 @@ int main(int argc, char **argv)
 	    if (welcome && getenv("NMON") == 0) {
 
 		COLOUR wattrset(padwelcome, COLOR_PAIR(2));
-/*
-mvwprintw(padwelcome,x+1, 3, "------------------------------");
-mvwprintw(padwelcome,x+2, 3, "#    #  #    #   ####   #    #");
-mvwprintw(padwelcome,x+3, 3, "##   #  ##  ##  #    #  ##   #");
-mvwprintw(padwelcome,x+4, 3, "# #  #  # ## #  #    #  # #  #");
-mvwprintw(padwelcome,x+5, 3, "#  # #  #    #  #    #  #  # #");
-mvwprintw(padwelcome,x+6, 3, "#   ##  #    #  #    #  #   ##");
-mvwprintw(padwelcome,x+7, 3, "#    #  #    #   ####   #    #");
-mvwprintw(padwelcome,x+8, 3, "------------------------------");
-*/
-		mvwprintw(padwelcome, x + 0, 3,
-			  "------------------------------");
-		mvwprintw(padwelcome, x + 1, 3,
-			  " _ __  _ __ ___   ___  _ __    ");
-		mvwprintw(padwelcome, x + 2, 3,
-			  "| '_ \\| '_ ` _ \\ / _ \\| '_ \\   ");
-		mvwprintw(padwelcome, x + 3, 3,
-			  "| | | | | | | | | (_) | | | |  ");
-		mvwprintw(padwelcome, x + 4, 3,
-			  "|_| |_|_| |_| |_|\\___/|_| |_|  ");
-		mvwprintw(padwelcome, x + 5, 3,
-			  "                              ");
-		mvwprintw(padwelcome, x + 6, 3,
-			  "------------------------------");
+		mvwprintw(padwelcome, x + 0, 3, "------------------------------");
+		mvwprintw(padwelcome, x + 1, 3, " _ __  _ __ ___   ___  _ __    ");
+		mvwprintw(padwelcome, x + 2, 3, "| '_ \\| '_ ` _ \\ / _ \\| '_ \\   ");
+		mvwprintw(padwelcome, x + 3, 3, "| | | | | | | | | (_) | | | |  ");
+		mvwprintw(padwelcome, x + 4, 3, "|_| |_|_| |_| |_|\\___/|_| |_|  ");
+		mvwprintw(padwelcome, x + 5, 3, "                              ");
+		mvwprintw(padwelcome, x + 6, 3, "------------------------------");
 
 		COLOUR wattrset(padwelcome, COLOR_PAIR(0));
 		mvwprintw(padwelcome, x + 1, 40, "For help type H or ...");
@@ -5099,6 +5105,13 @@ mvwprintw(padwelcome,x+8, 3, "------------------------------");
 #ifdef POWER 
 		get_cpu_cnt();
 		proc_read(P_CPUINFO);
+		/* find the highest MHz */
+		for(i=0; i<proc[P_CPUINFO].lines; i++) {
+			if(!strncmp("clock",proc[P_CPUINFO].line[i],5)) {
+				if( max_speed < atol(&proc[P_CPUINFO].line[i][9]))
+					max_speed = atol(&proc[P_CPUINFO].line[i][9]);
+			}	
+		}
 
 		lscpu_init();
 
@@ -5106,8 +5119,7 @@ mvwprintw(padwelcome,x+8, 3, "------------------------------");
 		case VM_POWERKVM_GUEST:
 		    get_cpu_cnt();
 #ifdef RHEL7
-		    mvwprintw(padwelcome, x + 8, 3, "%s %s", easy[0],
-			      easy[1]);
+		    mvwprintw(padwelcome, x + 8, 3, "%s %s", easy[0], easy[1]);
 #else
 #ifdef SLES113
 		    mvwprintw(padwelcome, x + 8, 3, "%s", easy[2]);
@@ -5119,8 +5131,7 @@ mvwprintw(padwelcome,x+8, 3, "------------------------------");
 			      &proc[P_CPUINFO].line[1][7]);
 		    mvwprintw(padwelcome, x + 10, 3,
 			      "PowerKVM Guest VirtualCPUs=%d LogicalCPUs=%d",
-			      (int) lparcfg.partition_active_processors,
-			      cpus);
+			      (int) lparcfg.partition_active_processors, cpus);
 		    mvwprintw(padwelcome, x + 11, 3,
 			      "PowerKVM Guest SMT=%d", lparcfg.smt_mode);
 		    break;
@@ -5132,8 +5143,7 @@ mvwprintw(padwelcome,x+8, 3, "------------------------------");
 			      "PowerKVM Host owns all %d CPUs & SMT=%d in the Hosting OS",
 			      cpus, lscpu.threads);
 		    mvwprintw(padwelcome, x + 11, 3, "PowerKVM Host %s",
-			      proc[P_CPUINFO].line[proc[P_CPUINFO].lines -
-						   2]);
+			      proc[P_CPUINFO].line[proc[P_CPUINFO].lines - 2]);
 		    break;
 		case VM_NATIVE:
 		    mvwprintw(padwelcome, x + 8, 3, "%s", easy[0]);
@@ -5143,8 +5153,7 @@ mvwprintw(padwelcome,x+8, 3, "------------------------------");
 			      "Native owns all %d CPUs & SMT=%d", cpus,
 			      lscpu.threads);
 		    mvwprintw(padwelcome, x + 11, 3, "Native %s",
-			      proc[P_CPUINFO].line[proc[P_CPUINFO].lines -
-						   2]);
+			      proc[P_CPUINFO].line[proc[P_CPUINFO].lines - 2]);
 		    break;
 		default:
 		case VM_POWERVM:
@@ -5176,8 +5185,8 @@ mvwprintw(padwelcome,x+8, 3, "------------------------------");
 		}
 
 		mvwprintw(padwelcome, x + 12, 3,
-			  "Processor Clock=%s             %s",
-			  &proc[P_CPUINFO].line[2][9], lscpu.byte_order);
+			  "Processor Clock=%ld MHz %s", max_speed, lscpu.byte_order);
+			  /*&proc[P_CPUINFO].line[2][9], lscpu.byte_order);*/
 
 #endif /*POWER*/
 #ifdef MAINFRAME
@@ -5233,11 +5242,13 @@ mvwprintw(padwelcome,x+8, 3, "------------------------------");
 		    if(processorchips != 0) 
 			mvwprintw(padwelcome, x + 11, 3, "ProcessorChips=%d", processorchips);
 		    if(cores != 0) 
-		    mvwprintw(padwelcome, x + 11, 20, "PhyscalCores=%d", cores);
+		    mvwprintw(padwelcome, x + 11, 20, "PhysicalCores=%d", cores);
 		    if(hyperthreads!= 0) 
 		    mvwprintw(padwelcome, x + 12, 3, "Hyperthreads  =%d", hyperthreads);
+#ifndef ARM
 		    if(cpus != 0) 
 		    mvwprintw(padwelcome, x + 12, 20, "VirtualCPUs =%d", cpus);
+#endif /* ARM */
 		}
 		    mvwprintw(padwelcome, x + 10, 42, "lscpu:CPU=%d %s", lscpu.cpus, lscpu.byte_order);
 		    mvwprintw(padwelcome, x + 11, 42, "      Sockets=%d Cores=%d Thrds=%d", lscpu.sockets, lscpu.cores, lscpu.threads);
@@ -5361,34 +5372,35 @@ mvwprintw(padwelcome,x+8, 3, "------------------------------");
 		      proc[P_CPUINFO].line[2]);
 	    mvwprintw(padres, 7, 4, "cpuinfo: %s",
 		      proc[P_CPUINFO].line[3]);
-	    mvwprintw(padres, 8, 4, "cpuinfo: %s",
+	    mvwprintw(padres, 8, 4, "cpuinfo: %s    %s",
+		      proc[P_CPUINFO].line[proc[P_CPUINFO].lines - 2],
 		      proc[P_CPUINFO].line[proc[P_CPUINFO].lines - 1]);
 	    /* needs lparcfg to be already processed */
 	    proc_lparcfg();
 	    switch (power_vm_type) {
 	    case VM_POWERKVM_GUEST:
-		mvwprintw(padres, 9, 4,
-			  "PowerKVM Guest Physcal CPU:%d & Virtual CPU (SMT):%d  %s",
+		mvwprintw(padres, 9, 20,
+			  "PowerKVM Guest Physical CPU:%d & Virtual CPU (SMT):%d  %s",
 			  lparcfg.partition_active_processors, cpus,
 			  lscpu.byte_order);
 		break;
 	    case VM_POWERKVM_HOST:
-		mvwprintw(padres, 9, 4,
+		mvwprintw(padres, 9, 20,
 			  "PowerKVM Host Physical CPU:%d  %s", cpus,
 			  lscpu.byte_order);
 		break;
 	    case VM_POWERVM:
-		mvwprintw(padres, 9, 4,
-			  "PowerVM Physcal CPU:%d & Logical CPU:%d  %s",
+		mvwprintw(padres, 9, 20,
+			  "PowerVM Physical CPU:%d & Logical CPU:%d  %s",
 			  lparcfg.partition_active_processors, cpus,
 			  lscpu.byte_order);
 		break;
 	    case VM_NATIVE:
-		mvwprintw(padres, 9, 4, "Native Mode Physical CPU:%d  %s",
+		mvwprintw(padres, 9, 20, "Native Mode Physical CPU:%d  %s",
 			  cpus, lscpu.byte_order);
 		break;
 	    }
-#else
+#endif /* POWER */
 #ifdef MAINFRAME
 	    mvwprintw(padres, 5, 4, "cpuinfo: %s",
 		      proc[P_CPUINFO].line[1]);
@@ -5398,32 +5410,27 @@ mvwprintw(padwelcome,x+8, 3, "------------------------------");
 		      proc[P_CPUINFO].line[3]);
 	    mvwprintw(padres, 8, 4, "cpuinfo: %s",
 		      proc[P_CPUINFO].line[4]);
-#else				/* MAINFRAME */
-#if X86 || ARM
-	    mvwprintw(padres, 5, 4, "cpuinfo: Vendor=%s Model=%s", vendor_ptr,
-		      model_ptr);
-	    mvwprintw(padres, 6, 4, "cpuinfo: Hz=%s bogomips=%s", mhz_ptr,
-		      bogo_ptr);
+#endif/* MAINFRAME */
+#ifdef X86 
+	    mvwprintw(padres, 5, 4, "cpuinfo: Vendor=%s Model=%s", vendor_ptr, model_ptr);
+	    mvwprintw(padres, 6, 4, "cpuinfo: Hz=%s bogomips=%s", mhz_ptr, bogo_ptr);
+
 	    if (processorchips || cores || hyperthreads || cpus) {
 		mvwprintw(padres, 7, 4,
-			  "cpuinfo: ProcessorChips=%d PhyscalCores=%d",
+			  "cpuinfo: ProcessorChips=%d PhysicalCores=%d",
 			  processorchips, cores);
 		mvwprintw(padres, 8, 4,
 			  "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d",
 			  hyperthreads, cpus);
 	    }
-#else				/* other platform perhaps ARM */
-	    mvwprintw(padres, 5, 4, "cpuinfo: %s",
-		      proc[P_CPUINFO].line[4]);
-	    mvwprintw(padres, 6, 4, "cpuinfo: %s",
-		      proc[P_CPUINFO].line[1]);
-	    mvwprintw(padres, 7, 4, "cpuinfo: %s",
-		      proc[P_CPUINFO].line[6]);
-	    mvwprintw(padres, 8, 4, "cpuinfo: %s",
-		      proc[P_CPUINFO].line[17]);
-#endif				/* X86 */
-#endif				/* MAINFRAME */
-#endif				/* POWER */
+#endif /* X86 */
+#ifdef ARM
+	    mvwprintw(padres, 5, 4, "cpuinfo: Vendor=%s Model=%s BogoMIPS=%s", vendor_ptr, model_ptr, bogo_ptr);
+            mvwprintw(padres, 6, 4, "lscpu: CPU=%d %s", lscpu.cpus, lscpu.byte_order);
+            mvwprintw(padres, 7, 4, "lscpu: Sockets=%d Cores=%d Thrds=%d", lscpu.sockets, lscpu.cores, lscpu.threads);
+            mvwprintw(padres, 8, 4, "lscpu: max=%d min=%d", lscpu.mhz_max, lscpu.mhz_min);
+
+#endif /* ARM */
 	    mvwprintw(padres, 9, 4, "# of CPUs: %d", cpus);
 	    COLOUR wattrset(padres, COLOR_PAIR(5));
 	    mvwprintw(padres, 10, 4, "Machine  : %s", uts.machine);
@@ -6096,7 +6103,7 @@ mvwprintw(padwelcome,x+8, 3, "------------------------------");
 		    COLOUR wattrset(padlpar, COLOR_PAIR(2));
 		    mvwprintw(padlpar, 3, 0,
 			      "Systems CPU Pool=%8.2f          Active=%8.2f    Total=%8.2f",
-			      (float) lparcfg.pool_capacity,
+			      (float) lparcfg.pool_capacity / 100.0,
 			      (float) lparcfg.system_active_processors,
 			      (float) lparcfg.system_potential_processors);
 		    COLOUR wattrset(padlpar, COLOR_PAIR(3));
@@ -6185,7 +6192,7 @@ mvwprintw(padwelcome,x+8, 3, "------------------------------");
 		    if (nvmlDeviceGetName
 			(gpu_device[i], &gpu_name[i][0],
 			 1024) != NVML_SUCCESS)
-			strcpy(gpu_name[i], "NVML API Failed");
+			strncpy(gpu_name[i], "NVML API Failed",1024);
 		}
 		if (nvmlDeviceGetUtilizationRates
 		    (gpu_device[i], &gpu_util[i]) != NVML_SUCCESS) {
@@ -6358,8 +6365,7 @@ mvwprintw(padwelcome,x+8, 3, "------------------------------");
 			    sscanf(&proc[P_CPUINFO].line[lineno][DATACOL],
 				   "%f", &mhz);
 			    mvwprintw(padmhz, padline, col, "%3d=%4.0f",
-				      (show_mhz != 1) ? cores : cpuno,
-				      mhz);
+				      (show_mhz != 1) ? cores : cpuno, mhz);
 			    if (show_mhz == 3) {
 				if (mhz > avg_mhz) {
 				    COLOUR wattrset(padmhz, COLOR_PAIR(1));
@@ -6367,12 +6373,10 @@ mvwprintw(padwelcome,x+8, 3, "------------------------------");
 				    COLOUR wattrset(padmhz, COLOR_PAIR(2));
 				}
 				for (i = 1; i < mhz / 100; i++)
-				    mvwprintw(padmhz, padline, col + 9 + i,
-					      "#");
+				    mvwprintw(padmhz, padline, col + 9 + i, "#");
 				COLOUR wattrset(padmhz, COLOR_PAIR(0));
 				for (; i < 60; i++)
-				    mvwprintw(padmhz, padline, col + 9 + i,
-					      " ");
+				    mvwprintw(padmhz, padline, col + 9 + i, " ");
 			    }
 			    padline++;
 			    if (padline > 22) {
@@ -8234,7 +8238,7 @@ I/F Name Recv=KB/s Trans=KB/s packin packout insize outsize Peak->Recv Trans
 			if (p->procs[i].pi_pgrp == p->procs[i].pi_pid)
 			    strcpy(pgrp, "none");
 			else
-			    sprintf(&pgrp[0], "%d", p->procs[i].pi_pgrp);
+			    snprintf(&pgrp[0], 32, "%d", p->procs[i].pi_pgrp);
 			/* skip over processes with 0 CPU */
 			if (!show_all
 			    && (topper[j].time / elapsed <
