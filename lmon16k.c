@@ -46,7 +46,7 @@ PRE_KERNEL_2_6_18 1 kernel levels before removed the following to the disk stats
 #define RAW(member)      (long)((long)(p->cpuN[i].member)   - (long)(q->cpuN[i].member))
 #define RAWTOTAL(member) (long)((long)(p->cpu_total.member) - (long)(q->cpu_total.member))
 
-#define VERSION "16j"
+#define VERSION "16k"
 char version[] = VERSION;
 static char *SccsId = "nmon " VERSION;
 
@@ -6138,7 +6138,7 @@ int main(int argc, char **argv)
 		/* Only print LPAR info to spreadsheet if in shared processor mode */
 		if (ret != 0 && lparcfg.shared_processor_mode > 0
 		    && power_vm_type == VM_POWERVM)
-		    fprintf(fp, "LPAR,%s,%9.6f,%d,%d,%d,%d,%d,%.2f,%.2f,%.2f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.2f,%d\n", LOOP, (double) lparcfg.purr_diff / (double) lparcfg.timebase / elapsed, lparcfg.capped, lparcfg.shared_processor_mode, lparcfg.system_potential_processors, lparcfg.system_active_processors, lparcfg.pool_capacity, lparcfg.MinEntCap / 100.0, lparcfg.partition_entitled_capacity / 100.0, lparcfg.partition_max_entitled_capacity / 100.0, lparcfg.MinProcs, cpus,	/* report logical CPU here so analyser graph CPU% vs VPs reports correctly */
+		    fprintf(fp, "LPAR,%s,%9.6f,%d,%d,%d,%d,%d,%.2f,%.2f,%.2f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.2f,%d\n", LOOP, (double) lparcfg.purr_diff / (double) lparcfg.timebase / elapsed, lparcfg.capped, lparcfg.shared_processor_mode, lparcfg.system_potential_processors, lparcfg.system_active_processors, lparcfg.pool_capacity /100, lparcfg.MinEntCap / 100.0, lparcfg.partition_entitled_capacity / 100.0, lparcfg.partition_max_entitled_capacity / 100.0, lparcfg.MinProcs, cpus,	/* report logical CPU here so analyser graph CPU% vs VPs reports correctly */
 			    lparcfg.partition_active_processors,
 			    lparcfg.partition_potential_processors,
 			    lparcfg.capacity_weight,
