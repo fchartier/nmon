@@ -23,7 +23,7 @@ nmon: lnmon.o
 #define RAW(member)      (long)((long)(p->cpuN[i].member)   - (long)(q->cpuN[i].member))
 #define RAWTOTAL(member) (long)((long)(p->cpu_total.member) - (long)(q->cpu_total.member)) 
 
-#define VERSION "15g" 
+#define VERSION "15h" 
 char version[] = VERSION;
 static char *SccsId = "nmon " VERSION;
 
@@ -4434,9 +4434,9 @@ get_cpu_cnt();
 	mvwprintw(padwelcome,x+ 9, 3, "%s %s", easy[0], easy[1]);
 #else
 #ifdef SLES113
-	mvwprintw(x+ 9, 3, "%s", easy[2]);
+	mvwprintw(padwelcome,x+ 9, 3, "%s", easy[2]);
 #else
-	mvwprintw(x+ 9, 3, "%s", easy[3]);
+	mvwprintw(padwelcome,x+ 9, 3, "%s", easy[3]);
 #endif /* SLES113 */
 #endif /* RHEL7 */
 	mvwprintw(padwelcome,x+10, 3, "PowerKVM Guest %s", &proc[P_CPUINFO].line[1][7]);
@@ -4457,7 +4457,15 @@ case VM_NATIVE:
 	break;
 default:
 case VM_POWERVM:
+#ifdef SLES113
+	mvwprintw(padwelcome,x+ 9, 3, "%s %s", easy[0],easy[2]);
+#else
+#ifdef RHEL7
+	mvwprintw(padwelcome,x+ 9, 3, "%s %s", easy[0],easy[1]);
+#else
 	mvwprintw(padwelcome,x+ 9, 3, "%s", easy[3]);
+#endif
+#endif
 	mvwprintw(padwelcome,x+10, 3, "PowerVM %s %s", &proc[P_CPUINFO].line[1][7], &proc[P_CPUINFO].line[proc[P_CPUINFO].lines-1][11]);
 	mvwprintw(padwelcome,x+11, 3, "PowerVM Entitlement=%-6.2f VirtualCPUs=%d LogicalCPUs=%d", 
 		(double)lparcfg.partition_entitled_capacity/100.0, (int)lparcfg.partition_active_processors, cpus);
