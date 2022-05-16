@@ -20,7 +20,7 @@
 
 /*
  * Use the following Makefile (for Linux on POWER)
-CFLAGS=-g -D JFS -D GETUSER -Wall -D LARGEMEM -D POWER -D KERNEL_2_6_18 
+CFLAGS=-g -Wall -D POWER 
 LDFLAGS=-lcurses -lm
 nmon: lmon.o
  * end of Makefile
@@ -34,10 +34,8 @@ Bug / missing feature workarounds:
 	LSBLK_NO_TYPE - SLES11.3 has not lsblk disk TYPE option
 
 Options which should always but switched on:
-GETUSER - U optio to load user details
-JFS - include FileSystem stats (most of which are now Journeled)
-LARGMEM - most Linux's do not have older LOW and High Memory memory
-KERNEL_2_6_18 1 kernel level and above adds the following to the disk stats 
+SMALLMEM - removes huge memory, dirty, whritebak, mapped, slab, pagethreads as not in older kernels
+PRE_KERNEL_2_6_18 1 kernel levels before removed the following to the disk stats 
 	pi_num_threads, 
 	pi_rt_priority, 
 	pi_policy, 
@@ -48,7 +46,7 @@ KERNEL_2_6_18 1 kernel level and above adds the following to the disk stats
 #define RAW(member)      (long)((long)(p->cpuN[i].member)   - (long)(q->cpuN[i].member))
 #define RAWTOTAL(member) (long)((long)(p->cpu_total.member) - (long)(q->cpu_total.member))
 
-#define VERSION "16i"
+#define VERSION "16j"
 char version[] = VERSION;
 static char *SccsId = "nmon " VERSION;
 
@@ -541,7 +539,7 @@ struct procsinfo {
     long pi_cstime;
     long pi_pri;
     long pi_nice;
-#ifndef KERNEL_2_6_18
+#ifdef PRE_KERNEL_2_6_18
     long junk /* removed */ ;
 #else
     long pi_num_threads;
@@ -566,7 +564,7 @@ struct procsinfo {
     unsigned long pi_cnswap;
     int pi_exit_signal;
     int pi_cpu;
-#ifdef KERNEL_2_6_18
+#ifndef PRE_KERNEL_2_6_18
     unsigned long pi_rt_priority;
     unsigned long pi_policy;
     unsigned long long pi_delayacct_blkio_ticks;
@@ -712,7 +710,7 @@ void find_release()
     int i;
     char tmpstr[1024+1];
 
-#ifdef SLES12
+#if defined(SLES12) || defined(SLES15)
     pop = popen("cat /etc/os-release 2>/dev/null", "r");
 #else
     pop = popen("cat /etc/*ease 2>/dev/null", "r");
@@ -985,7 +983,7 @@ struct mem_stat {
     long lowfree;
     long swaptotal;
     long swapfree;
-#ifdef LARGEMEM
+#ifndef SMALLMEM
     long dirty;
     long writeback;
     long mapped;
@@ -997,7 +995,7 @@ struct mem_stat {
     long hugesize;
 #else
     long bigfree;
-#endif /*LARGEMEM*/
+#endif /*SMALLMEM*/
 };
 
 struct vm_stat {
@@ -2352,6 +2350,10 @@ void proc_mem()
     p->mem.memtotal = proc_mem_search("MemTotal");
     p->mem.memfree = proc_mem_search("MemFree");
     p->mem.memshared = proc_mem_search("MemShared");
+    /* memshared was renamed (pointlessly) Sheme and includes RAM disks in later kernels */
+    if(p->mem.memshared <= 0)
+        p->mem.memshared = proc_mem_search("Shmem");
+
     p->mem.buffers = proc_mem_search("Buffers");
     p->mem.cached = proc_mem_search("Cached");
     p->mem.swapcached = proc_mem_search("SwapCached");
@@ -2363,7 +2365,7 @@ void proc_mem()
     p->mem.lowfree = proc_mem_search("LowFree");
     p->mem.swaptotal = proc_mem_search("SwapTotal");
     p->mem.swapfree = proc_mem_search("SwapFree");
-#ifdef LARGEMEM
+#ifndef SMALLMEM
     p->mem.dirty = proc_mem_search("Dirty");
     p->mem.writeback = proc_mem_search("Writeback");
     p->mem.mapped = proc_mem_search("Mapped");
@@ -2375,7 +2377,7 @@ void proc_mem()
     p->mem.hugesize = proc_mem_search("Hugepagesize");
 #else
     p->mem.bigfree = proc_mem_search("BigFree");
-#endif /*LARGEMEM*/
+#endif /*SMALLMEM*/
 }
 
 #define MAX_SNAPS 72
@@ -2750,51 +2752,7 @@ char *get_state(char n)
     }
 }
 
-#ifdef GETUSER
-/* Convert User id (UID) to a name with caching for speed 
- * getpwuid() should be NFS/yellow pages safe
- */
-char *getuser(uid_t uid)
-{
-#define NAMESIZE 16
-    struct user_info {
-	uid_t uid;
-	char name[NAMESIZE+1];
-    };
-    static struct user_info *u = NULL;
-    static int used = 0;
-    int i;
-    struct passwd *pw;
-
-    i = 0;
-    if (u != NULL) {
-	for (i = 0; i < used; i++) {
-	    if (u[i].uid == uid) {
-		return u[i].name;
-	    }
-	}
-	u = (struct user_info *) REALLOC(u,
-					 (sizeof(struct user_info) *
-					  (i + 1)));
-    } else
-	u = (struct user_info *) MALLOC(sizeof(struct user_info));
-    used++;
-
-    /* failed to find a match so add it */
-    u[i].uid = uid;
-    pw = getpwuid(uid);
-
-    if (pw != NULL) {
-	strncpy(u[i].name, pw->pw_name, NAMESIZE);
-	u[i].name[NAMESIZE] = 0;
-    } else
-	snprintf(u[i].name, NAMESIZE, "unknown%d", uid);
-    return u[i].name;
-}
-#endif				/* GETUSER */
-
 /* User Defined Disk Groups */
-
 char *save_word(char *in, char *out)
 {
     int len;
@@ -3008,13 +2966,6 @@ void list_dgroup(struct dsk_stat *dk)
 	}
 	fprintf(fp, "\n");
 	fprintf(fp, "DGINFLIGHT,Disk Group in flight IO %s", hostname);
-	for (i = 0; i < DGROUPS; i++) {
-	    if (dgroup_name[i] != 0)
-		fprintf(fp, ",%s", dgroup_name[i]);
-	}
-	fprintf(fp, "\n");
-	fprintf(fp, "DGIOTIME,Disk Group time spent for IO (ms) %s",
-		hostname);
 	for (i = 0; i < DGROUPS; i++) {
 	    if (dgroup_name[i] != 0)
 		fprintf(fp, ",%s", dgroup_name[i]);
@@ -3839,7 +3790,7 @@ int proc_procsinfo(int pid, int index)
     count++;
 
     ret = sscanf(&buf[count],
-#ifndef KERNEL_2_6_18
+#ifdef PRE_KERNEL_2_6_18
 		 "%c %d %d %d %d %d %lu %lu %lu %lu %lu %lu %lu %ld %ld %ld %ld %ld %ld %lu %lu %ld %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %d %d",
 #else
 		 "%c %d %d %d %d %d %lu %lu %lu %lu %lu %lu %lu %ld %ld %ld %ld %ld %ld %lu %lu %ld %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %d %d %lu %lu %llu",
@@ -3860,7 +3811,7 @@ int proc_procsinfo(int pid, int index)
 		 &p->procs[index].pi_cutime,
 		 &p->procs[index].pi_cstime,
 		 &p->procs[index].pi_pri, &p->procs[index].pi_nice,
-#ifndef KERNEL_2_6_18
+#ifdef PRE_KERNEL_2_6_18
 		 &p->procs[index].junk,
 #else
 		 &p->procs[index].pi_num_threads,
@@ -3883,14 +3834,14 @@ int proc_procsinfo(int pid, int index)
 		 &p->procs[index].pi_nswap,
 		 &p->procs[index].pi_cnswap,
 		 &p->procs[index].pi_exit_signal, &p->procs[index].pi_cpu
-#ifdef KERNEL_2_6_18
+#ifndef PRE_KERNEL_2_6_18
 		 ,
 		 &p->procs[index].pi_rt_priority,
 		 &p->procs[index].pi_policy,
 		 &p->procs[index].pi_delayacct_blkio_ticks
 #endif
 	);
-#ifndef KERNEL_2_6_18
+#ifdef PRE_KERNEL_2_6_18
     if (ret != 37) {
 	fprintf(stderr,
 		"procsinfo2 sscanf wanted 37 returned = %d pid=%d line=%s\n",
@@ -3980,7 +3931,7 @@ print_procs(int index)
     printf("procs[%d].cstime       =%ld\n", index, procs[index].pi_cstime);
     printf("procs[%d].pri           =%d\n", index, procs[index].pi_pri);
     printf("procs[%d].nice          =%d\n", index, procs[index].pi_nice);
-#ifndef KERNEL_2_6_18
+#ifdef PRE_KERNEL_2_6_18
     printf("procs[%d].junk          =%d\n", index, procs[index].junk);
 #else
     printf("procs[%d].num_threads   =%ld\n", index,
@@ -4017,7 +3968,7 @@ print_procs(int index)
     printf("procs[%d].exit_signal   =%d\n", index,
 	   procs[index].pi_exit_signal);
     printf("procs[%d].cpu           =%d\n", index, procs[index].pi_cpu);
-#ifdef KERNEL_2_6_18
+#ifndef PRE_KERNEL_2_6_18
     printf("procs[%d].rt_priority   =%lu\n", index,
 	   procs[index].pi_rt_priority);
     printf("procs[%d].policy        =%lu\n", index,
@@ -4226,10 +4177,12 @@ int main(int argc, char **argv)
     char user_filename_set = 0;
     char using_stdout = 0;
     struct statfs statfs_buffer;
+
     float fs_size;
     float fs_bsize;
     float fs_free;
     float fs_size_used;
+
     char cmdstr[256];
     long updays, uphours, upmins;
     float v2c_total;
@@ -4932,7 +4885,7 @@ int main(int argc, char **argv)
 #endif	 /*POWER*/
 	    if (show_top) {
 	    fprintf(fp, "TOP,%%CPU Utilisation\n");
-#ifndef KERNEL_2_6_18
+#ifdef PRE_KERNEL_2_6_18
 	    fprintf(fp,
 		    "TOP,+PID,Time,%%CPU,%%Usr,%%Sys,Size,ResSet,ResText,ResData,ShdLib,MinorFault,MajorFault,Command\n");
 #else
@@ -5016,7 +4969,7 @@ int main(int argc, char **argv)
 		   "/bin/cat /proc/partitions 2>/dev/null", WARNING);
 	linux_bbbp("/proc/1/stat", "/bin/cat /proc/1/stat 2>/dev/null",
 		   WARNING);
-#ifndef KERNEL_2_6_18
+#ifdef PRE_KERNEL_2_6_18
 	linux_bbbp("/proc/1/statm", "/bin/cat /proc/1/statm 2>/dev/null",
 		   WARNING);
 #endif
@@ -6138,7 +6091,7 @@ int main(int argc, char **argv)
 			      partition_potential_processors);
 		    COLOUR wattrset(padlpar, COLOR_PAIR(6));
 		    mvwprintw(padlpar, 6, 0,
-			      "Memory       Min= unknown             Now=%8.2f      Max=%8.2f",
+			      "Memory       Min=%8.2f         Desired=%8.2f  ",
 			      (float) lparcfg.MinMem,
 			      (float) lparcfg.DesMem);
 		    COLOUR wattrset(padlpar, COLOR_PAIR(0));
@@ -6504,7 +6457,7 @@ int main(int argc, char **argv)
 
 		mvwprintw(padmem, 5, 1,
 			  "Linux Kernel Internal Memory (MB)");
-#ifdef LARGEMEM
+#ifndef SMALLMEM
 		mvwprintw(padmem, 6, 1,
 			  "                       Cached=%10.1f     Active=%10.1f",
 			  p->mem.cached / 1024.0, p->mem.active / 1024.0);
@@ -6516,13 +6469,13 @@ int main(int argc, char **argv)
 		mvwprintw(padmem, 5, 68, "MB");
 		mvwprintw(padmem, 6, 55, "bigfree=%10.1f",
 			  p->mem.bigfree / 1024);
-#endif		 /*LARGEMEM*/
+#endif		 /*SMALLMEM*/
 		    mvwprintw(padmem, 7, 1,
 			      "Buffers=%10.1f Swapcached=%10.1f  Inactive =%10.1f",
 			      p->mem.buffers / 1024.0,
 			      p->mem.swapcached / 1024.0,
 			      p->mem.inactive / 1024.0);
-#ifdef LARGEMEM
+#ifndef SMALLMEM
 		mvwprintw(padmem, 8, 1,
 			  "Dirty  =%10.1f Writeback =%10.1f  Mapped   =%10.1f",
 			  p->mem.dirty / 1024.0, p->mem.writeback / 1024.0,
@@ -6532,7 +6485,7 @@ int main(int argc, char **argv)
 			  p->mem.slab / 1024.0,
 			  p->mem.committed_as / 1024.0,
 			  p->mem.pagetables / 1024.0);
-#endif /*LARGEMEM */
+#endif /*SMALLMEM */
 #ifdef POWER
 		if (!show_lpar)	/* check if already called above */
 		    proc_lparcfg();
@@ -6575,11 +6528,11 @@ int main(int argc, char **argv)
 			p->mem.swapfree / 1024.0,
 			p->mem.memshared / 1024.0, p->mem.cached / 1024.0,
 			p->mem.active / 1024.0,
-#ifdef LARGEMEM
+#ifndef SMALLMEM
 			-1.0,
 #else
 			p->mem.bigfree / 1024.0,
-#endif			 /*LARGEMEM*/
+#endif			 /*SMALLMEM*/
 			p->mem.buffers / 1024.0,
 			p->mem.swapcached / 1024.0,
 			p->mem.inactive / 1024.0);
@@ -6628,6 +6581,7 @@ int main(int argc, char **argv)
 		p->mem.hugesize = 16*1024;
 */
 	}
+#ifndef SMALLMEM
 	if (show_large) {
 	    proc_read(P_MEMINFO);
 	    proc_mem();
@@ -6669,6 +6623,7 @@ int main(int argc, char **argv)
 		}
 	    }
 	}
+#endif /* SMALLMEM */
 	if (show_vm) {
 #define VMDELTA(variable) (p->vm.variable - q->vm.variable)
 #define VMCOUNT(variable) (p->vm.variable                 )
@@ -7373,7 +7328,7 @@ I/F Name Recv=KB/s Trans=KB/s packin packout insize outsize Peak->Recv Trans
 	    if (show_neterror > 0)
 		show_neterror--;
 	}
-#ifdef JFS
+
 	if (show_jfs) {
 	    if (cursed) {
 		BANNER(padjfs, "File Systems");
@@ -7536,7 +7491,6 @@ I/F Name Recv=KB/s Trans=KB/s packin packout insize outsize Peak->Recv Trans
 		jfs_load(UNLOAD);
 	    }
 	}
-#endif				/* JFS */
 
 	if (show_disk || show_verbose || show_diskmap || show_dgroup) {
 	    proc_read(P_STAT);
@@ -8107,7 +8061,7 @@ I/F Name Recv=KB/s Trans=KB/s packin packout insize outsize Peak->Recv Trans
 					disk_total += DKDELTA(dk_rmsec);
 				    }
 				}
-				fprintf(fp, ",%.1f", disk_total);
+				fprintf(fp, ",%.1f", disk_total / elapsed);
 			    }
 			}
 			fprintf(fp, "\n");
@@ -8149,7 +8103,7 @@ I/F Name Recv=KB/s Trans=KB/s packin packout insize outsize Peak->Recv Trans
 					disk_total += DKDELTA(dk_wmsec);
 				    }
 				}
-				fprintf(fp, ",%.1f", disk_total);
+				fprintf(fp, ",%.1f", disk_total / elapsed);
 			    }
 			}
 			fprintf(fp, "\n");
@@ -8167,20 +8121,6 @@ I/F Name Recv=KB/s Trans=KB/s packin packout insize outsize Peak->Recv Trans
 			    }
 			}
 			fprintf(fp, "\n");
-			fprintf(fp, "DGIOTIME,%s", LOOP);
-			for (k = 0; k < dgroup_total_groups; k++) {
-			    if (dgroup_name[k] != 0) {
-				disk_total = 0.0;
-				for (j = 0; j < dgroup_disks[k]; j++) {
-				    i = dgroup_data[k * DGROUPITEMS + j];
-				    if (i != -1) {
-					disk_total += DKDELTA(dk_time);
-				    }
-				}
-				fprintf(fp, ",%.1f", disk_total);
-			    }
-			}
-			fprintf(fp, "\n");
 			fprintf(fp, "DGBACKLOG,%s", LOOP);
 			for (k = 0; k < dgroup_total_groups; k++) {
 			    if (dgroup_name[k] != 0) {
@@ -8191,7 +8131,7 @@ I/F Name Recv=KB/s Trans=KB/s packin packout insize outsize Peak->Recv Trans
 					disk_total += DKDELTA(dk_backlog);
 				    }
 				}
-				fprintf(fp, ",%.1f", disk_total);
+				fprintf(fp, ",%.1f", disk_total / elapsed);
 			    }
 			}
 			fprintf(fp, "\n");
@@ -8512,7 +8452,7 @@ I/F Name Recv=KB/s Trans=KB/s packin packout insize outsize Peak->Recv Trans
 				|| (!cmdfound
 				    && ((topper[j].time / elapsed) >
 					ignore_procdisk_threshold))) {
-#ifndef KERNEL_2_6_18
+#ifdef PRE_KERNEL_2_6_18
 				fprintf(fp,
 					"TOP,%07d,%s,%.2f,%.2f,%.2f,%lu,%lu,%lu,%lu,%lu,%d,%d,%s\n",
 #else
@@ -8532,7 +8472,7 @@ I/F Name Recv=KB/s Trans=KB/s packin packout insize outsize Peak->Recv Trans
 					/* 11 */ (int) (COUNTDELTA(pi_minflt) / elapsed),
 					/* 12 */ (int) (COUNTDELTA(pi_majflt) / elapsed),
 					/* 13 */ p->procs[i].pi_comm
-#ifndef KERNEL_2_6_18
+#ifdef PRE_KERNEL_2_6_18
 				    );
 #else
 					,
