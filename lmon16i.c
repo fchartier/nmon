@@ -48,7 +48,7 @@ KERNEL_2_6_18 1 kernel level and above adds the following to the disk stats
 #define RAW(member)      (long)((long)(p->cpuN[i].member)   - (long)(q->cpuN[i].member))
 #define RAWTOTAL(member) (long)((long)(p->cpu_total.member) - (long)(q->cpu_total.member))
 
-#define VERSION "16h"
+#define VERSION "16i"
 char version[] = VERSION;
 static char *SccsId = "nmon " VERSION;
 
@@ -267,6 +267,7 @@ int error_on = 0;
 void error(char *err)
 {
     strncpy(errorstr, err, 69);
+    errorstr[69] = 0;
 }
 
 /*
@@ -843,7 +844,7 @@ void args_load()
 	    if (tmpstr[strlen(tmpstr) - 1] == ' ')
 		tmpstr[strlen(tmpstr) - 1] = 0;
 	    arglist[i].pid = atoi(tmpstr);
-	    arglist[i].args = MALLOC(strlen(tmpstr));
+	    arglist[i].args = MALLOC(strlen(tmpstr) + 1);
 	    strcpy(arglist[i].args, &tmpstr[6]);
 	}
 	pclose(pop);
@@ -1006,6 +1007,8 @@ struct vm_stat {
     long long nr_page_table_pages;
     long long nr_mapped;
     long long nr_slab;
+    long long nr_slab_reclaimable;
+    long long nr_slab_unreclaimable;
     long long pgpgin;
     long long pgpgout;
     long long pswpin;
@@ -1506,7 +1509,12 @@ int read_vmstat()
     GETVM(nr_unstable);
     GETVM(nr_page_table_pages);
     GETVM(nr_mapped);
-    GETVM(nr_slab);
+    if(p->vm.nr_slab != -1)  
+	    GETVM(nr_slab);
+    if(p->vm.nr_slab == -1)  {
+	    GETVM(nr_slab_reclaimable);
+	    GETVM(nr_slab_unreclaimable);
+    }
     GETVM(pgpgin);
     GETVM(pgpgout);
     GETVM(pswpin);
@@ -2751,7 +2759,7 @@ char *getuser(uid_t uid)
 #define NAMESIZE 16
     struct user_info {
 	uid_t uid;
-	char name[NAMESIZE];
+	char name[NAMESIZE+1];
     };
     static struct user_info *u = NULL;
     static int used = 0;
@@ -2776,9 +2784,10 @@ char *getuser(uid_t uid)
     u[i].uid = uid;
     pw = getpwuid(uid);
 
-    if (pw != NULL)
+    if (pw != NULL) {
 	strncpy(u[i].name, pw->pw_name, NAMESIZE);
-    else
+	u[i].name[NAMESIZE] = 0;
+    } else
 	snprintf(u[i].name, NAMESIZE, "unknown%d", uid);
     return u[i].name;
 }
@@ -3313,9 +3322,9 @@ void help(void)
 #define JFSTYPELEN 8
 
 struct jfs {
-    char name[JFSNAMELEN];
-    char device[JFSNAMELEN];
-    char type[JFSNAMELEN];
+    char name[JFSNAMELEN+1];
+    char device[JFSNAMELEN+1];
+    char type[JFSNAMELEN+1];
     int fd;
     int mounted;
 } jfs[JFSMAX];
@@ -3333,12 +3342,12 @@ void jfs_load(int load)
 	if (jfs_loaded == 0) {
 	    mfp = setmntent("/etc/mtab", "r");
 	    for (i = 0; i < JFSMAX && (mp = getmntent(mfp)) != NULL; i++) {
-		strncpy(jfs[i].device, mp->mnt_fsname, JFSNAMELEN);
-		strncpy(jfs[i].name, mp->mnt_dir, JFSNAMELEN);
-		strncpy(jfs[i].type, mp->mnt_type, JFSTYPELEN);
-		mp->mnt_fsname[JFSNAMELEN - 1] = 0;
-		mp->mnt_dir[JFSNAMELEN - 1] = 0;
-		mp->mnt_type[JFSTYPELEN - 1] = 0;
+		strncpy(jfs[i].device, mp->mnt_fsname, JFSNAMELEN + 1);
+		strncpy(jfs[i].name, mp->mnt_dir, JFSNAMELEN + 1);
+		strncpy(jfs[i].type, mp->mnt_type, JFSTYPELEN + 1);
+		mp->mnt_fsname[JFSNAMELEN] = 0;
+		mp->mnt_dir[JFSNAMELEN] = 0;
+		mp->mnt_type[JFSTYPELEN] = 0;
 	    }
 	    endmntent(mfp);
 	    jfs_loaded = 1;
@@ -3426,6 +3435,7 @@ int checkinput(void)
 	    p = getenv("NMON");
 	    if (p != 0) {
 		strncpy(buf, p, 1024);
+		buf[1024 - 1] = 0;
 		chars = strlen(buf);
 	    } else
 		chars = 0;
@@ -4269,7 +4279,8 @@ int main(int argc, char **argv)
     char toprio_ch;
     unsigned long topwio;
     char topwio_ch;
-	
+    long long tmpslab;
+    char * slabstr;
     char truncated_command[257]; /* 256 +1 */
 
 
@@ -4351,12 +4362,14 @@ int main(int argc, char **argv)
     /* Setup long and short Hostname */
     gethostname(hostname, sizeof(hostname));
     strncpy(fullhostname, hostname, 256);
+    fullhostname[256 - 1] = 0;
     for (i = 0; i < sizeof(hostname); i++)
 	if (hostname[i] == '.')
 	    hostname[i] = 0;
-    if (run_name_set == 0)
+    if (run_name_set == 0) {
 	strncpy(run_name, hostname, 256);
-
+	run_name[256 - 1] = 0;
+    }
     if (getuid() == 0)
 	isroot = 1;
 
@@ -4391,7 +4404,7 @@ int main(int argc, char **argv)
 	    break;
 	case 'C':		/* commandlist argument */
 	    cmdlist[0] = MALLOC(strlen(optarg) + 1);	/* create buffer */
-	    strcpy(cmdlist[0], optarg);
+	    strncpy(cmdlist[0], optarg, strlen(optarg) + 1);
 	    if (cmdlist[0][0] != 0)
 		cmdfound = 1;
 	    for (i = 0, j = 1; cmdlist[0][i] != 0; i++) {
@@ -4418,8 +4431,8 @@ int main(int argc, char **argv)
 	    extended_disk = 1;
 	    break;
 	case 'F':		/* background mode with user supplied filename */
-	    user_filename = MALLOC(strlen(optarg));
-	    strcpy(user_filename, optarg);
+	    user_filename = MALLOC(strlen(optarg) + 1);
+	    strncpy(user_filename, optarg, strlen(optarg) + 1);
 	    user_filename_set++;
 	    go_background(288, 300);
 	    break;
@@ -4488,7 +4501,8 @@ int main(int argc, char **argv)
 	    show_headings = 0;
 	    break;
 	case 'r':
-	    strncpy(run_name, optarg, 255);
+	    strncpy(run_name, optarg, 256);
+	    run_name[256 - 1] = 0;
 	    run_name_set++;
 	    break;
 	case 's':
@@ -4677,17 +4691,19 @@ int main(int argc, char **argv)
 	tim->tm_year += 1900 - 2000;	/* read localtime() manual page!! */
 	tim->tm_mon += 1;	/* because it is 0 to 11 */
 	if (varperftmp) {
-	    open_filename = MALLOC(1024*4);
-	    snprintf(open_filename, 1024 * 4, "/var/perf/tmp/%s_%02d.nmon", hostname,
+	    if(strlen(hostname) > 1024 )
+		    hostname[255] = 0;
+	    open_filename = MALLOC(strlen(hostname) + 64); /* hostname plus directory size plus the number */
+	    snprintf(open_filename, strlen(hostname) + 63,  "/var/perf/tmp/%s_%02d.nmon", hostname,
 		    tim->tm_mday);
 	}
 	else if (user_filename_set && user_filename != 0) {
-	    open_filename = MALLOC(strlen(user_filename)+1);
-	    strncpy(open_filename, user_filename, strlen(user_filename));
+	    open_filename = MALLOC(strlen(user_filename) + 1);
+	    strncpy(open_filename, user_filename, strlen(user_filename) + 1);
 	}
 	else {
-	    open_filename = MALLOC(1024*4);
-	    snprintf(open_filename, 1024 * 4, "%s_%02d%02d%02d_%02d%02d.nmon",
+	    open_filename = MALLOC(strlen(hostname) + 64);
+	    snprintf(open_filename, strlen(hostname) + 63, "%s_%02d%02d%02d_%02d%02d.nmon",
 		    hostname,
 		    tim->tm_year,
 		    tim->tm_mon, tim->tm_mday, tim->tm_hour, tim->tm_min);
@@ -6192,7 +6208,7 @@ int main(int argc, char **argv)
 		    if (nvmlDeviceGetName
 			(gpu_device[i], &gpu_name[i][0],
 			 1024) != NVML_SUCCESS)
-			strncpy(gpu_name[i], "NVML API Failed",1024);
+			strcpy(gpu_name[i], "NVML API Failed");
 		}
 		if (nvmlDeviceGetUtilizationRates
 		    (gpu_device[i], &gpu_util[i]) != NVML_SUCCESS) {
@@ -6396,7 +6412,11 @@ int main(int argc, char **argv)
 			break;
 		}
 		avg_mhz = (min_mhz + max_mhz) / 2;
-		DISPLAY(padmhz, 23);
+		if(cores >= 20)
+			lineno = 23;
+		else
+			lineno = cores+3;
+		DISPLAY(padmhz, lineno);
 	    } else {
 		if (!show_rrd)
 		    fprintf(fp, "MHZ,%s", LOOP);
@@ -6502,7 +6522,7 @@ int main(int argc, char **argv)
 			      p->mem.buffers / 1024.0,
 			      p->mem.swapcached / 1024.0,
 			      p->mem.inactive / 1024.0);
-
+#ifdef LARGEMEM
 		mvwprintw(padmem, 8, 1,
 			  "Dirty  =%10.1f Writeback =%10.1f  Mapped   =%10.1f",
 			  p->mem.dirty / 1024.0, p->mem.writeback / 1024.0,
@@ -6512,6 +6532,7 @@ int main(int argc, char **argv)
 			  p->mem.slab / 1024.0,
 			  p->mem.committed_as / 1024.0,
 			  p->mem.pagetables / 1024.0);
+#endif /*LARGEMEM */
 #ifdef POWER
 		if (!show_lpar)	/* check if already called above */
 		    proc_lparcfg();
@@ -6684,12 +6705,21 @@ int main(int argc, char **argv)
 			mvwprintw(padpage, 5, 0,
 				  "nr_mapped   =%9lld pgfree      =%8lld",
 				  VMCOUNT(nr_mapped), VMDELTA(pgfree));
-			mvwprintw(padpage, 6, 0,
+			if(VMCOUNT(nr_slab) != -1 ) { /* older nr_slab only */
+			    mvwprintw(padpage, 6, 0,
 				  "nr_slab     =%9lld pgactivate  =%8lld",
 				  VMCOUNT(nr_slab), VMDELTA(pgactivate));
-			mvwprintw(padpage, 7, 0,
+			    mvwprintw(padpage, 7, 0,
 				  "                       pgdeactivate=%8lld",
 				  VMDELTA(pgdeactivate));
+			} else { /*new nr_slab_reclaimable / nr_slab_unreclaimable Kernel 2.6.19+ */
+			    mvwprintw(padpage, 6, 0,
+				  "slab_reclaim=%9lld pgactivate  =%8lld",
+				  VMCOUNT(nr_slab_reclaimable), VMDELTA(pgactivate));
+			    mvwprintw(padpage, 7, 0,
+				  "slab_unreclm=%9lld pgdeactivate=%8lld",
+				  VMCOUNT(nr_slab_unreclaimable), VMDELTA(pgdeactivate));
+			}
 			mvwprintw(padpage, 8, 0,
 				  "allocstall  =%9lld pgfault     =%8lld  kswapd_steal     =%7lld",
 				  VMDELTA(allocstall), VMDELTA(pgfault),
@@ -6742,8 +6772,12 @@ int main(int argc, char **argv)
 		    show_vm = 0;
 		} else if (vm_first_time) {
 		    vm_first_time = 0;
+		    if(VMCOUNT(nr_slab) == -1 ) 
+			    slabstr = "nr_slab_reclaimable";
+		    else
+			    slabstr = "nr_slab";
 		    fprintf(fp,
-			    "VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_page_table_pages,nr_mapped,nr_slab,pgpgin,pgpgout,pswpin,pswpout,pgfree,pgactivate,pgdeactivate,pgfault,pgmajfault,pginodesteal,slabs_scanned,kswapd_steal,kswapd_inodesteal,pageoutrun,allocstall,pgrotated,pgalloc_high,pgalloc_normal,pgalloc_dma,pgrefill_high,pgrefill_normal,pgrefill_dma,pgsteal_high,pgsteal_normal,pgsteal_dma,pgscan_kswapd_high,pgscan_kswapd_normal,pgscan_kswapd_dma,pgscan_direct_high,pgscan_direct_normal,pgscan_direct_dma\n");
+			    "VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_page_table_pages,nr_mapped,%s,pgpgin,pgpgout,pswpin,pswpout,pgfree,pgactivate,pgdeactivate,pgfault,pgmajfault,pginodesteal,slabs_scanned,kswapd_steal,kswapd_inodesteal,pageoutrun,allocstall,pgrotated,pgalloc_high,pgalloc_normal,pgalloc_dma,pgrefill_high,pgrefill_normal,pgrefill_dma,pgsteal_high,pgsteal_normal,pgsteal_dma,pgscan_kswapd_high,pgscan_kswapd_normal,pgscan_kswapd_dma,pgscan_direct_high,pgscan_direct_normal,pgscan_direct_dma\n", slabstr);
 		}
 		if (show_rrd)
 		    str_p = "rrdtool update vm.rrd %s"
@@ -6763,7 +6797,10 @@ int main(int argc, char **argv)
 			",%lld,%lld,%lld,%lld,%lld"
 			",%lld,%lld,%lld,%lld,%lld"
 			",%lld,%lld,%lld,%lld,%lld" ",%lld,%lld\n";
-
+		if(VMCOUNT(nr_slab) != -1)
+			tmpslab = VMCOUNT(nr_slab);
+		else
+			tmpslab = VMCOUNT(nr_slab_reclaimable);
 		fprintf(fp, str_p,
 			LOOP,
 			VMCOUNT(nr_dirty),
@@ -6771,7 +6808,7 @@ int main(int argc, char **argv)
 			VMCOUNT(nr_unstable),
 			VMCOUNT(nr_page_table_pages),
 			VMCOUNT(nr_mapped),
-			VMCOUNT(nr_slab),
+			tmpslab,
 			VMDELTA(pgpgin),
 			VMDELTA(pgpgout),
 			VMDELTA(pswpin),
@@ -6898,7 +6935,7 @@ int main(int argc, char **argv)
 		     p->cpu_total.idletime) / p->cpu_total.uptime * 100.0;
 		if (average > 0.0)
 		    mvwprintw(padker, 5, BOOTCOL,
-			      "Average CPU use=%6.2f%%", average);
+			      "Average Busy Uptimee=%6.2f%%", average);
 		else
 		    mvwprintw(padker, 5, BOOTCOL, "Uptime has overflowed");
 		mvwprintw(padker, 7, BOOTCOL, "%d CPU core threads", cpus);
@@ -8346,7 +8383,7 @@ I/F Name Recv=KB/s Trans=KB/s packin packout insize outsize Peak->Recv Trans
 				mvwprintw(padtop, j + 3 - skipped, 16, "%7lu", p->procs[i].statm_resident * pagesize / 1024);	/* in KB */
 			        COLOUR wattrset(padtop, COLOR_PAIR(3));
 				strncpy( truncated_command, args_lookup(p->procs[i].pi_pid, p->procs[i].pi_comm), 256);
-				truncated_command[256] = 0;
+				truncated_command[255] = 0; /* worst longest case */
 				truncated_command[COLS - 24 - 2] = 0;
 				
 				mvwprintw(padtop, j + 3 - skipped, 24, "%-120s", truncated_command);
